@@ -18,4 +18,5 @@ uv pip install --no-build-isolation -e .
 docker pull ubuntu:24.04
 docker compose build --no-cache
 docker compose up -d
+docker compose exec ramulator2 bash
 ```
