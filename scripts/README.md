@@ -83,6 +83,25 @@ PYTHONPATH="ramulator2/python:ramulator2" .venv/bin/python -m py_compile scripts
 PYTHONPATH="ramulator2/python:ramulator2" .venv/bin/python scripts/gen_figures.py --help
 ```
 
+## Prerequisites: building Ramulator 2.1
+
+The vendored `ramulator2/` subdirectory must be on the **`v2.1`** branch and built:
+
+```bash
+# Verify branch
+git -C ramulator2 branch --show-current          # should print v2.1
+
+# Build (uses ramulator2/.venv, produces libramulator.so and Python wrappers)
+cd ramulator2 && bash build.sh && cd ..
+
+The build produces `ramulator2/libramulator.so` and auto-generates Python wrappers
+under `ramulator2/python/ramulator/`.  All scripts in this directory expect both
+to be present and importable via:
+
+```bash
+export PYTHONPATH="ramulator2/python:ramulator2"
+```
+
 ## Dependencies
 
 The script depends only on:
@@ -90,4 +109,5 @@ The script depends only on:
 - `ramulator2/python/ramulator` — Ramulator Python bindings (auto-generated from C++)
 - `scripts/lib/` — local helpers (`runner.py`, `backend_replay.py`, etc.)
 - `matplotlib`, `numpy` — rendering
+
 
