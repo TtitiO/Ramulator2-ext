@@ -1,0 +1,55 @@
+build/
+.vscode
+ext/
+ramulator2
+*.so
+autobuild.sh
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+ramulator2-venv/
+.venv/
+
+# Reference docs (large binaries)
+resources/jedec/
+
+# Generated artifacts
+*.png
+tests/plots/
+sweep_log.txt
+.ipynb_checkpoints/tests/plots/
+
+.claude/
+CLAUDE.md
+docs/
+legacy/
+jedec/
+local_notes/
+
+internal/
+
+build-perf/
+visualize_profiling.py
+
+# Profiling/benchmarking
+BOTTLENECK_QUICK_REFERENCE.md
+PROFILING_ANALYSIS.md
+PROFILING_SUMMARY.md
+PROFILING_METHODOLOGY.md
+callgrind.out
+profile_run.py
+src/ramulator/bench/
+verify_cycle_counts.py
+gprof*/
+
+*.out
+*.json
+bench_all_standards.py
+build*/
+.DS_Store
+
