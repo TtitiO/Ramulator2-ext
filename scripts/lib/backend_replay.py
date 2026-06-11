@@ -28,26 +28,47 @@ LPDDR5_PIM_CONFIG = {
         "pim_enabled": True,
         "pim_mode": "bank",
         "pim_datatype": "int8",
+        "pim_banks_per_mpu": 2,
+        "pim_mac_execution_model": "shared_mpu_serial",
     },
     "frontend_clock_ratio": 4,
 }
 
 
-def create_dram(cfg: dict | None = None):
-    """Instantiate an LPDDR5PIM DRAM object from config."""
+def pim_cfg_per_bank() -> dict:
+    """Return DRAM kwargs for k=1: per-bank (dedicated) PIM — one bank per MPU."""
+    return {"pim_banks_per_mpu": 1, "pim_mac_execution_model": "shared_mpu_serial"}
+
+
+def pim_cfg_shared() -> dict:
+    """Return DRAM kwargs for k=2: Samsung-style shared PIM — two banks per MPU."""
+    return {"pim_banks_per_mpu": 2, "pim_mac_execution_model": "shared_mpu_serial"}
+
+
+def create_dram(cfg: dict | None = None, *, dram_kwargs_overrides: dict | None = None):
+    """Instantiate an LPDDR5PIM DRAM object from config.
+
+    *dram_kwargs_overrides* are merged into the config's dram_kwargs, allowing
+    callers to override ``pim_banks_per_mpu``, ``pim_mac_execution_model``, etc.
+    without cloning the entire config dict.
+    """
     import ramulator
 
     cfg = cfg or LPDDR5_PIM_CONFIG
+    dram_kwargs = dict(cfg.get("dram_kwargs", {}))
+    if dram_kwargs_overrides:
+        dram_kwargs.update(dram_kwargs_overrides)
     return ramulator.dram.LPDDR5PIM(
         org_preset=cfg["org_preset"],
         timing_preset=cfg["timing_preset"],
-        **cfg.get("dram_kwargs", {}),
+        **dram_kwargs,
     )
 
 
 def _make_frontend(trace_path: Path, dram, *, clock_ratio: int = 4,
                    max_trace_bytes: int | None = None,
-                   max_expanded_records: int | None = None):
+                   max_expanded_records: int | None = None,
+                   max_inflight_requests: int = 1):
     """Build an LPDDR5PIMConcreteTrace frontend for *trace_path*."""
     import ramulator
 
@@ -70,6 +91,7 @@ def _make_frontend(trace_path: Path, dram, *, clock_ratio: int = 4,
         addr_vec_size=layout["addr_vec_size"],
         max_repeat=100_000_000,     # large prefill traces need >1M per record
         max_records=10_000_000,     # safety ceiling
+        max_inflight_requests=max_inflight_requests,
     )
     if max_trace_bytes is not None:
         kwargs["max_trace_bytes"] = max_trace_bytes
@@ -117,6 +139,8 @@ def replay_concrete_trace(
     materialize_weights: bool = False,
     max_trace_bytes: int = 1024 * 1024 * 1024,
     max_expanded_records: int = 100_000_000_000,
+    pim_cfg_override: dict | None = None,
+    max_inflight_requests: int = 1,
 ) -> dict:
     """Run a concrete LPDDR5-PIM trace through the Ramulator backend.
 
@@ -129,15 +153,21 @@ def replay_concrete_trace(
         have been lowered with the appropriate setting.
     max_trace_bytes, max_expanded_records : int
         Safety caps forwarded to the C++ frontend.
+    pim_cfg_override : dict | None
+        DRAM kwargs overrides (e.g. ``{"pim_banks_per_mpu": 1}``).
+    max_inflight_requests : int
+        Max concurrent outstanding requests allowed before the frontend blocks
+        (default 1 = fully serial). Set >1 to exercise shared-MPU contention.
 
     Returns
     -------
-    dict with keys: cycles, runtime_ns, command_counts, replay_ok, frontend_stats
+    dict with keys: cycles, runtime_ns, command_counts, replay_ok,
+    frontend_stats, and stall counters (pim_mpu_group_stalls, …).
     """
     import ramulator
     from ramulator.workload_surrogate.lpddr5_pim_concrete_trace import write_jsonl
 
-    dram = create_dram()
+    dram = create_dram(dram_kwargs_overrides=pim_cfg_override)
     tck_ns = time_unit_ns()
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -149,6 +179,7 @@ def replay_concrete_trace(
             clock_ratio=LPDDR5_PIM_CONFIG["frontend_clock_ratio"],
             max_trace_bytes=max_trace_bytes,
             max_expanded_records=max_expanded_records,
+            max_inflight_requests=max_inflight_requests,
         )
         mem = _make_mem(dram)
         sim = ramulator.Simulation(frontend, mem)
@@ -160,15 +191,20 @@ def replay_concrete_trace(
     cycles = int(ctrl.get("cycles", 0) or 0)
 
     # The concrete-trace frontend doesn't export a "completed" field;
-    # replay is OK if cycles > 0 and pim_mac was issued.
+    # replay is OK if cycles > 0 and either pim_mac or pim_mac_ab was issued.
     pim_mac = int(ctrl.get("num_issued_pim_mac", 0) or 0)
-    replay_ok = cycles > 0 and pim_mac > 0
+    pim_mac_ab_issued = int(ctrl.get("num_issued_pim_mac_ab", 0) or 0)
+    replay_ok = cycles > 0 and (pim_mac > 0 or pim_mac_ab_issued > 0)
+
+    # PIM stall / resource counters (exposed by LPDDR5PIM controller).
+    stall_key = lambda k: int(ctrl.get(k, 0) or 0)
 
     return {
         "cycles": cycles,
         "runtime_ns": cycles * tck_ns,
         "command_counts": count_concrete_opcodes(concrete_records),
         "pim_mac_issued": pim_mac,
+        "pim_mac_ab_issued": pim_mac_ab_issued,
         "pim_bcast_issued": int(ctrl.get("num_issued_pim_bcast", 0) or 0),
         "replay_ok": replay_ok,
         "frontend_stats": {
@@ -176,6 +212,17 @@ def replay_concrete_trace(
                                 "completed", "total_records_replayed")
             if k in fe
         },
+        # PIM stall counters
+        "pim_mpu_group_stalls": stall_key("pim_mpu_group_stalls"),
+        "pim_dependency_stalls": stall_key("pim_dependency_stalls"),
+        "pim_capacity_stalls": stall_key("pim_capacity_stalls"),
+        "pim_inflight_peak": stall_key("pim_inflight_peak"),
+        "pim_simultaneous_active_banks_peak": stall_key("pim_simultaneous_active_banks_peak"),
+        "pim_banks_per_mpu": stall_key("pim_banks_per_mpu"),
+        "effective_mpu_groups": stall_key("effective_mpu_groups"),
+        "pim_ab_mac_latency_cycles": stall_key("pim_ab_mac_latency_cycles"),
+        "num_bank_timing_blocked_cycles": stall_key("num_bank_timing_blocked_cycles"),
+        "num_mpu_group_busy_blocked_cycles": stall_key("num_mpu_group_busy_blocked_cycles"),
     }
 
 
@@ -186,6 +233,10 @@ def generate_and_replay(
     past_len: int = 1024,
     prompt_len: int = 12,
     materialize_weights: bool = False,
+    pim_cfg_override: dict | None = None,
+    max_inflight_requests: int = 1,
+    interleave_depth: int = 4,
+    mac_mode: str = "per_bank",
 ) -> dict:
     """End-to-end: generate semantic → lower to concrete → replay backend.
 
@@ -196,6 +247,10 @@ def generate_and_replay(
     past_len : Context length for decode (ignored for prefill).
     prompt_len : Prompt length for prefill (ignored for decode).
     materialize_weights : False = steady-state, True = cold-start.
+    pim_cfg_override : dict | None
+        DRAM kwargs overrides (e.g. ``pim_cfg_per_bank()`` for k=1).
+    max_inflight_requests : int
+        Max concurrent outstanding requests (default 1 = serial).
 
     Returns
     -------
@@ -223,14 +278,58 @@ def generate_and_replay(
     else:
         raise ValueError(f"Unknown phase: {phase}")
 
-    # Lower to concrete
-    concrete = lower_semantic_records_to_concrete(
-        semantic, materialize_weights=materialize_weights,
-    )
+    # Lower to concrete; enable bank interleaving only when the caller requests
+    # concurrent inflight ops (ftable path).  Serial-latency figures (F4/F5/F6)
+    # keep max_inflight_requests=1 and get the unchanged bank-major emission.
+    #
+    # For the interleaved path we must hand the lowering the device's real
+    # multi-level bank decomposition (bank_positions/bank_counts) so flat banks
+    # 0..N-1 map correctly into the addr_vec.  Otherwise banks beyond the single
+    # bank_level slot's capacity (4 on the 8Gb x16 preset) alias incorrectly.
+    interleave_banks = max_inflight_requests > 1
+    lower_kwargs: dict = {
+        "materialize_weights": materialize_weights,
+        "interleave_banks": interleave_banks,
+        "mac_mode": mac_mode,
+    }
+    if interleave_banks:
+        layout = _extract_dram_layout(create_dram(dram_kwargs_overrides=pim_cfg_override))
+        lower_kwargs["addr_vec_size"] = layout["addr_vec_size"]
+        lower_kwargs["bank_positions"] = layout["bank_positions"]
+        lower_kwargs["bank_counts"] = layout["bank_counts"]
+        lower_kwargs["row_level"] = layout["row_pos"]
+        lower_kwargs["col_level"] = layout["col_pos"]
+        lower_kwargs["interleave_depth"] = interleave_depth
+    concrete = lower_semantic_records_to_concrete(semantic, **lower_kwargs)
     opcode_counts = count_concrete_opcodes(concrete)
 
+    # Auto-scale the inflight window so it can span every bank in the round-robin
+    # at the chosen interleave depth.  Without this, a window narrower than
+    # (#banks x interleave_depth) structurally caps how many banks run in
+    # parallel (e.g. a 16-deep window at depth 4 only reaches ~4-7 of 16 banks).
+    # k=1 needs the full window to expose all banks; the shared-MPU model (k=2)
+    # then throttles concurrency on its own.
+    #
+    # This applies ONLY to the per-bank interleaved path.  All-bank MAC ops are
+    # strictly serialized in the controller (one m_pim_ab_inflight at a time) and
+    # already address every bank per op, so concurrency is modeled by the AB
+    # latency scaling, not by a wide window.  Widening the window there just
+    # piles dozens of blocked AB requests into the read buffer that FRFCFS
+    # rescans every tick -- a ~65x per-cycle slowdown (12.65M-op llama trace:
+    # 400s+ timeout at width 64 vs 6s at width 1) with no change in results.
+    effective_inflight = max_inflight_requests
+    if interleave_banks and mac_mode != "all_bank":
+        max_bank_span = max(
+            (len(r["bank_sequence"]) for r in semantic if r.get("bank_sequence")),
+            default=1,
+        )
+        effective_inflight = max(max_inflight_requests, max_bank_span * interleave_depth)
+    elif mac_mode == "all_bank":
+        effective_inflight = 1
+
     # Replay through backend
-    result = replay_concrete_trace(concrete)
+    result = replay_concrete_trace(concrete, pim_cfg_override=pim_cfg_override,
+                                   max_inflight_requests=effective_inflight)
     mode = "cold_start" if materialize_weights else "steady_state"
 
     return {
