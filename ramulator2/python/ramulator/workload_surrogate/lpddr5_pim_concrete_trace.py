@@ -140,6 +140,47 @@ def validate_record(record: dict) -> None:
             raise ValueError("Concrete opcode addr_byte_stride must be a positive integer")
         addr_vec_from_byte_address(record["addr_byte"] + (repeat - 1) * addr_byte_stride, addr_vec_size=len(record["addr_vec"]))
 
+    # In-memory bank interleaving fields (PIM_MAC only; compact expansion).
+    _INTERLEAVE_FIELDS = {
+        "bank_sequence", "dependency_count", "row_count", "row_start",
+        "column_start", "resolved_row_offset", "resolved_col_offset",
+        "interleave_depth", "interleave_start_idx",
+        "bank_positions", "bank_counts", "bank_level", "row_level", "col_level",
+    }
+    if _INTERLEAVE_FIELDS & set(record) and opcode != "PIM_MAC":
+        raise ValueError("Concrete opcode bank interleaving fields are only valid for PIM_MAC")
+    if "bank_sequence" in record:
+        bank_seq = record["bank_sequence"]
+        if not isinstance(bank_seq, list) or not bank_seq:
+            raise ValueError("Concrete opcode bank_sequence must be a non-empty list")
+        if any(not isinstance(b, int) or b < 0 for b in bank_seq):
+            raise ValueError("Concrete opcode bank_sequence entries must be non-negative integers")
+    if "dependency_count" in record:
+        dc = record["dependency_count"]
+        if isinstance(dc, bool) or not isinstance(dc, int) or dc < 1:
+            raise ValueError("Concrete opcode dependency_count must be a positive integer")
+    if "row_count" in record:
+        rc = record["row_count"]
+        if isinstance(rc, bool) or not isinstance(rc, int) or rc < 1:
+            raise ValueError("Concrete opcode row_count must be a positive integer")
+    if "interleave_depth" in record:
+        idep = record["interleave_depth"]
+        if isinstance(idep, bool) or not isinstance(idep, int) or idep < 1:
+            raise ValueError("Concrete opcode interleave_depth must be a positive integer")
+    if "interleave_start_idx" in record:
+        isi = record["interleave_start_idx"]
+        if isinstance(isi, bool) or not isinstance(isi, int) or isi < 0:
+            raise ValueError("Concrete opcode interleave_start_idx must be a non-negative integer")
+    if "bank_positions" in record or "bank_counts" in record:
+        if "bank_positions" not in record or "bank_counts" not in record:
+            raise ValueError("Concrete opcode bank_positions and bank_counts must be provided together")
+        bp = record["bank_positions"]
+        bc = record["bank_counts"]
+        if not isinstance(bp, list) or not isinstance(bc, list) or len(bp) != len(bc) or not bp:
+            raise ValueError("Concrete opcode bank_positions and bank_counts must be non-empty lists of equal length")
+        if any(not isinstance(v, int) for v in bp + bc):
+            raise ValueError("Concrete opcode bank_positions and bank_counts entries must be integers")
+
     provenance = record["provenance"]
     if not isinstance(provenance, dict):
         raise ValueError("Concrete opcode provenance must be a map")

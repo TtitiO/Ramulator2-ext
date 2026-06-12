@@ -78,9 +78,36 @@ PIM_MAC_EXECUTION_MODELS = {
     "subbank_overlap_experimental",
 }
 
-for resource in PIM_DATATYPE_METADATA.values():
-    for energy_field in PIM_EVENT_ENERGY_FIELDS:
-        resource[energy_field] = 0.0
+# v5 literature-anchored defaults (COEFFICIENT_TABLE.md v5, CW-3)
+# pim_compute_energy_pJ_per_mac: int8=0.35 (CD-PIM, LPDDR5-PIM-native C1),
+#                                 fp16/int16/bf16=0.55 (Samsung ratio, P3-LLM cross-check, C1)
+# pim_cell_to_pim_energy_pJ_per_256b: 2.68 (O'Connor ePre+ePost-GSA, C2)
+# pim_interconnect_energy_pJ_per_256b: 0.80 (O'Connor eI/O, C2)
+# pim_vrf_access_energy_pJ: 3.76 (Lama-syn near-bank buffer 256b, C2)
+# pim_srf_access_energy_pJ: 2.98 (Lama-syn column latch, C2/C3)
+# pim_mode_switch_energy_pJ: 0.0  (no public number; C3 placeholder)
+# pim_array_local_energy_pJ: 0.0  (folded into movement; charged in layer-1)
+_PIM_ENERGY_DEFAULTS_BY_DTYPE: dict[str, dict[str, float]] = {
+    "int8":  {"pim_compute_energy_pJ_per_mac": 0.35},
+    "fp16":  {"pim_compute_energy_pJ_per_mac": 0.55},
+    "int16": {"pim_compute_energy_pJ_per_mac": 0.55},
+    "bf16":  {"pim_compute_energy_pJ_per_mac": 0.55},
+}
+_PIM_ENERGY_SHARED_DEFAULTS: dict[str, float] = {
+    "pim_array_local_energy_pJ":           0.0,
+    "pim_cell_to_pim_energy_pJ_per_256b":  2.68,
+    "pim_interconnect_energy_pJ_per_256b": 0.80,
+    "pim_vrf_access_energy_pJ":            3.76,
+    "pim_srf_access_energy_pJ":            2.98,
+    "pim_mode_switch_energy_pJ":           0.0,
+}
+
+for _dtype, _resource in PIM_DATATYPE_METADATA.items():
+    for _field in PIM_EVENT_ENERGY_FIELDS:
+        _resource[_field] = (
+            _PIM_ENERGY_DEFAULTS_BY_DTYPE.get(_dtype, {}).get(_field)
+            or _PIM_ENERGY_SHARED_DEFAULTS[_field]
+        )
 
 
 class LPDDR5PIM(LPDDR5):

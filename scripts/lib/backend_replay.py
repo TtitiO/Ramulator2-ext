@@ -236,7 +236,7 @@ def generate_and_replay(
     pim_cfg_override: dict | None = None,
     max_inflight_requests: int = 1,
     interleave_depth: int = 4,
-    mac_mode: str = "per_bank",
+    mac_mode: str = "per_kind",
 ) -> dict:
     """End-to-end: generate semantic → lower to concrete → replay backend.
 
@@ -303,22 +303,22 @@ def generate_and_replay(
     concrete = lower_semantic_records_to_concrete(semantic, **lower_kwargs)
     opcode_counts = count_concrete_opcodes(concrete)
 
-    # Auto-scale the inflight window so it can span every bank in the round-robin
-    # at the chosen interleave depth.  Without this, a window narrower than
-    # (#banks x interleave_depth) structurally caps how many banks run in
-    # parallel (e.g. a 16-deep window at depth 4 only reaches ~4-7 of 16 banks).
-    # k=1 needs the full window to expose all banks; the shared-MPU model (k=2)
-    # then throttles concurrency on its own.
+    # Inflight-window policy.
     #
-    # This applies ONLY to the per-bank interleaved path.  All-bank MAC ops are
-    # strictly serialized in the controller (one m_pim_ab_inflight at a time) and
-    # already address every bank per op, so concurrency is modeled by the AB
-    # latency scaling, not by a wide window.  Widening the window there just
-    # piles dozens of blocked AB requests into the read buffer that FRFCFS
-    # rescans every tick -- a ~65x per-cycle slowdown (12.65M-op llama trace:
-    # 400s+ timeout at width 64 vs 6s at width 1) with no change in results.
+    # All-bank (PIM_MAC_AB) ops are strictly serialized in the controller (one
+    # m_pim_ab_inflight at a time) and already address every bank per op, so
+    # concurrency is modeled by the banks_per_mpu-scaled AB latency, NOT by a wide
+    # window.  Pure-all_bank research traces stay at width 1.
+    #
+    # per_kind and per_bank both get a wide window auto-scaled to span all banks:
+    # - per_kind traces mix all-bank FFN ops with per-bank attention ops; the
+    #   wide window lets per-bank PIM_MAC on independent banks issue in parallel.
+    #   Change 1 (controller-side AB-inflight short-circuit) keeps the embedded
+    #   all-bank op scans cheap even with a wide window.
+    # - per_bank traces are pure per-bank PIM_MAC; the wide window exposes bank
+    #   parallelism for the shared-MPU (k2) contention model.
     effective_inflight = max_inflight_requests
-    if interleave_banks and mac_mode != "all_bank":
+    if interleave_banks and mac_mode in ("per_kind", "per_bank"):
         max_bank_span = max(
             (len(r["bank_sequence"]) for r in semantic if r.get("bank_sequence")),
             default=1,

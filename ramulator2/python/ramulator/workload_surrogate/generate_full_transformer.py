@@ -42,6 +42,10 @@ LLAMA2_7B_HEAD_DIM = 128
 LLAMA2_7B_HIDDEN_SIZE = 4096
 LLAMA2_7B_FFN_HIDDEN_SIZE = 11008
 LLAMA2_7B_DEFAULT_PAST_LEN = 1024
+# The 8Gb LPDDR5-PIM preset exposes 16 bank units (one rank). Dense transformer
+# manifests round-robin PIM_MAC work across all 16 banks so the per-bank (k=1)
+# vs shared-MPU (k=2) comparison matches the F4/F5/F6 device configuration.
+DENSE_PIM_BANK_SEQUENCE = list(range(16))
 LLAMA2_13B_NUM_LAYERS = 40
 LLAMA2_13B_NUM_HEADS = 40
 LLAMA2_13B_HEAD_DIM = 128
@@ -686,7 +690,7 @@ def get_llama2_dense_decoder_attention_manifest(
             "ffn_intermediate": "bank_local_capacity_controlled",
         },
         "ramulator_visible_defaults": {
-            "bank_sequence": [0, 1, 2, 3],
+            "bank_sequence": list(DENSE_PIM_BANK_SEQUENCE),
             "bank_sequence_order": "frontend",
             "pim_banks_per_mpu": 1,
             "burst_length": 1,
@@ -743,7 +747,7 @@ def get_llama2_dense_decoder_ffn_manifest(
             "ffn_intermediate": "bank_local_capacity_controlled",
         },
         "ramulator_visible_defaults": {
-            "bank_sequence": [0, 1, 2, 3],
+            "bank_sequence": list(DENSE_PIM_BANK_SEQUENCE),
             "bank_sequence_order": "frontend",
             "pim_banks_per_mpu": 1,
             "burst_length": 1,

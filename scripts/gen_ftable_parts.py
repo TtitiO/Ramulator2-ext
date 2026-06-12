@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Generate results/ftable_parts/ — the k1-vs-k2 all-bank PIM MAC comparison.
+"""Generate results/ftable_parts/ — the k1-vs-k2 PIM MAC comparison.
 
 Standalone regenerator for the ftable simulation parts.  Each (model, config)
 point is simulated independently and cached as its own JSON part, so the run is
 resumable: re-running only re-simulates missing parts unless --force is given.
 
 The k1/k2 contrast is the CD-PIM vs LP-Spec comparison:
-  k1 = pim_banks_per_mpu=1  -> dedicated per-bank compute unit (AB MAC latency = base)
-  k2 = pim_banks_per_mpu=2  -> one MPU time-shared across 2 banks (AB MAC latency = 2x base)
-Both light up all 16 banks per all-bank MAC; the discriminator is per-op latency,
-not active-bank count.
+  k1 = pim_banks_per_mpu=1  -> dedicated per-bank compute unit
+  k2 = pim_banks_per_mpu=2  -> one MPU time-shared across 2 banks
 
-All-bank MAC ops are strictly serialized in the controller, so the replay forces
-max_inflight_requests=1 (the generate_and_replay all-bank path does this itself);
-a wider inflight window only piles blocked requests into the read buffer and
-slows simulation ~65x with identical results.
+Lowering is per-kind (mac_mode="per_kind"), the physically faithful model:
+  - weight-stationary ops (FFN/projection/MoE: stationary weight shards, broadcast
+    activation) -> all-bank PIM_MAC_AB.  k2 pays 2x the AB MAC latency because each
+    shared MPU walks its 2 banks serially -- this is the k1/k2 discriminator.
+  - data-stationary ops (AttentionScore/Context: each bank holds a distinct
+    KV-cache slice) -> per-bank PIM_MAC, identical under k1 and k2.
+
+All-bank MAC ops are strictly serialized in the controller, so generate_and_replay
+forces max_inflight_requests=1 for the per_kind path; a wider window only piles
+blocked AB requests into the read buffer and slows simulation ~65x, no result change.
 
 Usage:
   scripts/gen_ftable_parts.py                 # fill in missing parts, 6 workers
@@ -47,9 +51,21 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "results"
 # Kept identical to gen_figures.py FTABLE_WORKLOADS / PIM_CONFIGS so parts are
 # interchangeable with the --collect ftable path.
 FTABLE_WORKLOADS = (
-    {"model_key": "llama2-7b",  "phase": "decode",  "past_len": 1024, "prompt_len": None},
-    {"model_key": "qwen25-14b", "phase": "decode",  "past_len": 1024, "prompt_len": None},
-    {"model_key": "gemma2-9b",  "phase": "prefill", "past_len": None, "prompt_len": 12},
+    {"model_key": "llama2-7b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "llama2-13b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "llama2-70b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "opt-125m",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "opt-350m",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "opt-1.3b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-7b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-14b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-32b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-72b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma-2b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma-7b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma2-9b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma2-27b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "mixtral-8x7b", "phase": "decode", "past_len": 1024, "prompt_len": None},
 )
 
 PIM_CONFIGS = {
@@ -76,8 +92,8 @@ def _run_task(task: dict) -> dict:
         prompt_len=task.get("prompt_len") or 12,
         materialize_weights=False,
         pim_cfg_override=task["pim_cfg_override"],
-        max_inflight_requests=16,   # all-bank path internally clamps to 1
-        mac_mode="all_bank",
+        max_inflight_requests=16,   # all-bank/per_kind path internally clamps to 1
+        mac_mode="per_kind",        # FFN/proj broadcast (PIM_MAC_AB); attention per-bank (PIM_MAC)
     )
     part_path = Path(task["part_path"])
     part_path.parent.mkdir(parents=True, exist_ok=True)
@@ -114,8 +130,24 @@ def aggregate(output_dir: Path, parts_dir: Path) -> None:
     rows: list[dict] = []
     for wl in FTABLE_WORKLOADS:
         model_key, phase = wl["model_key"], wl["phase"]
-        spec = get_model_spec(model_key)
-        model_name = spec.name if spec else model_key
+        # Mixtral-8x7B is generated via a dedicated function, not the model
+        # registry, so get_model_spec raises for it — fall back to fixed metadata.
+        try:
+            spec = get_model_spec(model_key)
+        except (KeyError, ValueError):
+            spec = None
+        if spec is not None:
+            model_name = spec.name
+            hidden_size = int(spec.hidden_size)
+            num_layers = int(spec.num_layers)
+        elif model_key == "mixtral-8x7b":
+            model_name = "Mixtral-8x7B"
+            hidden_size = 4096
+            num_layers = 32
+        else:
+            model_name = model_key
+            hidden_size = 0
+            num_layers = 0
         k1_part = _part_path(parts_dir, model_key, "k1")
         k2_part = _part_path(parts_dir, model_key, "k2")
         if not (k1_part.exists() and k2_part.exists()):
@@ -136,8 +168,8 @@ def aggregate(output_dir: Path, parts_dir: Path) -> None:
             "model_key": model_key,
             "model_family": _infer_model_family(model_name),
             "phase": phase,
-            "hidden_size": int(spec.hidden_size) if spec else 0,
-            "num_layers": int(spec.num_layers) if spec else 0,
+            "hidden_size": hidden_size,
+            "num_layers": num_layers,
             "cycles_k1": cyc1,
             "cycles_k2": cyc2,
             "runtime_ns_k1": float(k1["runtime_ns"]),
@@ -159,7 +191,7 @@ def aggregate(output_dir: Path, parts_dir: Path) -> None:
         })
 
     out = {
-        "description": "Transformer-trace PIM comparison: CD-PIM dedicated per-bank CU (k=1) vs LP-Spec 2-banks/MPU shared (k=2) all-bank MAC",
+        "description": "Transformer-trace PIM comparison: CD-PIM dedicated per-bank CU (k=1) vs LP-Spec 2-banks/MPU shared (k=2). Per-kind lowering: weight-stationary FFN/projection/MoE → all-bank broadcast PIM_MAC_AB (k2 pays 2x AB latency); data-stationary attention (KV per-bank slice) → per-bank PIM_MAC (k-invariant).",
         "provenance": {"date": time.strftime("%Y-%m-%d"), "generator": "scripts/gen_ftable_parts.py"},
         "rows": rows,
         "schema_version": 1,

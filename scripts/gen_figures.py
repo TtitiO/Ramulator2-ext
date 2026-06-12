@@ -332,6 +332,9 @@ def _run_f4_task(task: dict) -> dict:
         past_len=task.get("past_len", 1024),
         prompt_len=task.get("prompt_len", 12),
         materialize_weights=task["materialize_weights"],
+        pim_cfg_override=task.get("pim_cfg_override"),
+        max_inflight_requests=task.get("max_inflight_requests", 1),
+        mac_mode=task.get("mac_mode", "per_kind"),
     )
     part_path = Path(task["part_path"])
     part_path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,7 +402,13 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
         safe = model.replace("-", "_").replace(".", "_")
         return parts_dir / f"{safe}__{phase}__{mode}.json"
 
-    # Build task list for all (model, phase, mode) combinations
+    # Build task list for all (model, phase, mode) combinations.
+    # F4 uses the paper's k=2 (LP-Spec shared-MPU, 2 banks/MPU) configuration with
+    # per-kind lowering: weight-stationary FFN/MoE/QKV → all-bank PIM_MAC_AB,
+    # data-stationary attention → per-bank PIM_MAC.  max_inflight_requests=16
+    # enables the per-record inflight window so attention banks parallelize.
+    from lib.backend_replay import pim_cfg_shared
+    f4_pim_cfg = pim_cfg_shared()
     tasks: list[dict] = []
     for model in F4_DECODE_MODELS:
         for mode in MODES:
@@ -411,6 +420,9 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                 "past_len": DECODE_PAST_LEN,
                 "materialize_weights": mode == "cold_start",
                 "part_path": str(part),
+                "pim_cfg_override": f4_pim_cfg,
+                "max_inflight_requests": 16,
+                "mac_mode": "per_kind",
             })
     for model in F4_PREFILL_MODELS:
         for mode in MODES:
@@ -422,6 +434,9 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                 "prompt_len": F4_PREFILL_PROMPT_LEN,
                 "materialize_weights": mode == "cold_start",
                 "part_path": str(part),
+                "pim_cfg_override": f4_pim_cfg,
+                "max_inflight_requests": 16,
+                "mac_mode": "per_kind",
             })
 
     total = len(tasks)
@@ -542,11 +557,66 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
 
 
 def render_f4(output_dir: Path) -> None:
-    """Render F4 with paper/scripts/gen_paper_figures.py's renderer."""
-    paper_figures = _load_paper_figure_module()
-    paper_figures.CROSS_MODEL_DECODE_CACHE = output_dir / F4_DECODE_JSON
-    paper_figures.CROSS_MODEL_PREFILL_CACHE = output_dir / F4_PREFILL_JSON
-    paper_figures.gen_f4(output_dir / FIGURE_DIRNAME)
+    """Render F4 cross-model cycles figure.
+
+    Falls back to a standalone renderer when tests.analysis is unavailable
+    (e.g. anonymous-submission builds), producing an identical figure.
+    """
+    try:
+        paper_figures = _load_paper_figure_module()
+        paper_figures.CROSS_MODEL_DECODE_CACHE = output_dir / F4_DECODE_JSON
+        paper_figures.CROSS_MODEL_PREFILL_CACHE = output_dir / F4_PREFILL_JSON
+        paper_figures.gen_f4(output_dir / FIGURE_DIRNAME)
+        return
+    except (ImportError, ModuleNotFoundError):
+        pass  # fall through to standalone renderer below
+
+    # Standalone renderer — no tests.analysis dependency.
+    C_BAR_A = "#b8c8dc"; C_BAR_B = "#d8c0b0"; C_EDGE = "#555555"; C_ANNOT = "0.35"
+
+    def _cycles_label(v: float) -> str:
+        if v >= 1e9: return f"{v/1e9:.1f}B"
+        if v >= 1e6: return f"{v/1e6:.0f}M"
+        return f"{v/1e3:.0f}K"
+
+    def _f4_bar_panel(ax, rows: list[dict], *, title: str, ylabel: bool = True) -> None:
+        order: list[str] = []
+        for r in rows:
+            n = str(r.get("model_name", "?"))
+            if n not in order:
+                order.append(n)
+        by = {(str(r.get("model_name", "?")), str(r.get("mode", "steady_state"))): r for r in rows}
+        modes = [("steady_state", "Steady", C_BAR_A), ("cold_start", "Cold", C_BAR_B)]
+        x = list(range(len(order))); w = 0.34; vals_all: list[float] = []
+        for idx, (mode, label, color) in enumerate(modes):
+            off = [p + (idx - 0.5) * w for p in x]
+            vals = [float(by.get((n, mode), {}).get("cycles", 0) or 0) for n in order]
+            vals_all.extend(v for v in vals if v > 0)
+            bars = ax.bar(off, vals, w, label=label, color=color,
+                          edgecolor=C_EDGE, linewidth=0.3, alpha=0.88)
+            for bar, v in zip(bars, vals):
+                if v > 0:
+                    ax.text(bar.get_x() + bar.get_width() / 2, v * 1.06,
+                            _cycles_label(v), ha="center", va="bottom",
+                            fontsize=5.0, rotation=90, color=C_ANNOT)
+        ax.set_xticks(x, order, rotation=40, ha="right")
+        ax.set_yscale("log")
+        if vals_all:
+            ax.set_ylim(min(vals_all) * 0.4, max(vals_all) * 3.5)
+        if ylabel:
+            ax.set_ylabel("Backend cycles")
+        ax.set_title(title, pad=8)
+        ax.legend(loc="upper left", bbox_to_anchor=(0.0, 1.12),
+                  frameon=False, handlelength=1.0)
+        _grid(ax, "y")
+
+    d_rows = json.loads((output_dir / F4_DECODE_JSON).read_text("utf-8"))["rows"]
+    p_rows = json.loads((output_dir / F4_PREFILL_JSON).read_text("utf-8"))["rows"]
+    fig = plt.figure(figsize=(10.5, 3.2))
+    fig.subplots_adjust(left=0.06, right=0.995, bottom=0.32, top=0.88, wspace=0.15)
+    _f4_bar_panel(fig.add_subplot(1, 2, 1), d_rows, title="(a) Decode backend cycles")
+    _f4_bar_panel(fig.add_subplot(1, 2, 2), p_rows, title="(b) Prefill backend cycles", ylabel=False)
+    _save(fig, output_dir / FIGURE_DIRNAME, "f4_cross_model_cycles")
 
 
 def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
@@ -1115,9 +1185,21 @@ def render_f6(output_dir: Path) -> None:
 # ── Transformer-trace per-bank (k=1) vs shared (k=2) PIM comparison table ──
 
 FTABLE_WORKLOADS = (
-    {"model_key": "llama2-7b",  "phase": "decode",  "past_len": 1024, "prompt_len": None},
-    {"model_key": "qwen25-14b", "phase": "decode",  "past_len": 1024, "prompt_len": None},
-    {"model_key": "gemma2-9b",  "phase": "prefill", "past_len": None, "prompt_len": 12},
+    {"model_key": "llama2-7b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "llama2-13b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "llama2-70b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "opt-125m",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "opt-350m",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "opt-1.3b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-7b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-14b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-32b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "qwen25-72b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma-2b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma-7b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma2-9b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "gemma2-27b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "mixtral-8x7b", "phase": "decode", "past_len": 1024, "prompt_len": None},
 )
 
 PIM_CONFIGS = {
@@ -1179,7 +1261,7 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
                 "part_path": str(part),
                 "pim_label": label,
                 "max_inflight_requests": 16,
-                "mac_mode": "all_bank",
+                "mac_mode": "per_kind",
             })
 
     total = len(tasks)
@@ -1214,8 +1296,24 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
     for wl in FTABLE_WORKLOADS:
         model_key = wl["model_key"]
         phase = wl["phase"]
-        spec = get_model_spec(model_key)
-        model_name = spec.name if spec else model_key
+        # Mixtral-8x7B has no registry spec (generated via dedicated function);
+        # fall back to fixed metadata.
+        try:
+            spec = get_model_spec(model_key)
+        except (KeyError, ValueError):
+            spec = None
+        if spec is not None:
+            model_name = spec.name
+            hidden_size = int(spec.hidden_size)
+            num_layers = int(spec.num_layers)
+        elif model_key == "mixtral-8x7b":
+            model_name = "Mixtral-8x7B"
+            hidden_size = 4096
+            num_layers = 32
+        else:
+            model_name = model_key
+            hidden_size = 0
+            num_layers = 0
 
         # Load k1 and k2 results
         k1_part = _part_path(model_key, "k1")
@@ -1250,8 +1348,8 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
             "model_key": model_key,
             "model_family": _infer_model_family(model_name),
             "phase": phase,
-            "hidden_size": int(spec.hidden_size) if spec else 0,
-            "num_layers": int(spec.num_layers) if spec else 0,
+            "hidden_size": hidden_size,
+            "num_layers": num_layers,
             "cycles_k1": cycles_k1,
             "cycles_k2": cycles_k2,
             "runtime_ns_k1": runtime_ns_k1,
@@ -1275,7 +1373,7 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
 
     payload = {
         "schema_version": 1,
-        "description": "Transformer-trace PIM comparison: CD-PIM dedicated per-bank CU (k=1) vs LP-Spec 2-banks/MPU shared (k=2) all-bank MAC",
+        "description": "Transformer-trace PIM comparison: CD-PIM dedicated per-bank CU (k=1) vs LP-Spec 2-banks/MPU shared (k=2). Per-kind lowering: weight-stationary FFN/projection/MoE → all-bank broadcast PIM_MAC_AB (k2 pays 2x AB latency); data-stationary attention (KV per-bank slice) → per-bank PIM_MAC (k-invariant).",
         "provenance": {"date": date.today().isoformat(), "generator": "scripts/gen_figures.py"},
         "rows": rows,
     }
