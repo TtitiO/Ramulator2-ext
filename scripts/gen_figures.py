@@ -1367,13 +1367,15 @@ def main() -> int:
 
     if args.render is not None:
         for target in _expand_target(args.render):
-            RENDERERS[target](args.output_dir)
+            if target in RENDERERS:
+                RENDERERS[target](args.output_dir)
         return 0
 
     for target in _dedup_collect_targets(_expand_target(args.all)):
         COLLECTORS[target](args.output_dir, force=args.force, workers=args.workers)
     for target in _expand_target(args.all):
-        RENDERERS[target](args.output_dir)
+        if target in RENDERERS:
+            RENDERERS[target](args.output_dir)
     return 0
 
 
