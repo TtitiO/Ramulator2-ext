@@ -1,6 +1,7 @@
 """LPDDR5-PIM concrete-trace backend replay.
 
-Used by ``scripts/gen_figures.py`` for F4, F5, and ftable data collection.
+Used by ``scripts/gen_figures.py`` for the cross-model and pim-sharing
+data collection.
 """
 
 from __future__ import annotations
@@ -33,12 +34,10 @@ LPDDR5_PIM_CONFIG = {
 
 
 def pim_cfg_per_bank() -> dict:
-    """k=1: dedicated per-bank PIM — one bank per MPU."""
     return {"pim_banks_per_mpu": 1, "pim_mac_execution_model": "shared_mpu_serial"}
 
 
 def pim_cfg_shared() -> dict:
-    """k=2: shared-MPU PIM — two banks per MPU."""
     return {"pim_banks_per_mpu": 2, "pim_mac_execution_model": "shared_mpu_serial"}
 
 
@@ -126,11 +125,6 @@ def replay_concrete_trace(
     pim_cfg_override: dict | None = None,
     max_inflight_requests: int = 1,
 ) -> dict:
-    """Replay already-lowered concrete opcodes through the Ramulator backend.
-
-    pim_cfg_override is merged into the DRAM kwargs (e.g. pim_banks_per_mpu).
-    max_inflight_requests controls the frontend's inflight window.
-    """
     import ramulator
     from ramulator.workload_surrogate.lpddr5_pim_concrete_trace import write_jsonl
 
@@ -196,11 +190,6 @@ def generate_and_replay(
     interleave_depth: int = 4,
     mac_mode: str = "per_kind",
 ) -> dict:
-    """Generate semantic records → lower to concrete → replay through backend.
-
-    mac_mode: "per_kind" (weight-stationary FFN=all-bank, attention=per-bank),
-              "per_bank" (all per-bank PIM_MAC), or "all_bank" (all PIM_MAC_AB).
-    """
     from ramulator.workload_surrogate.generate_full_transformer import (
         generate_dense_decoder_records_for_model,
         generate_dense_prefill_records_for_model,
@@ -241,8 +230,7 @@ def generate_and_replay(
     concrete = lower_semantic_records_to_concrete(semantic, **lower_kwargs)
     opcode_counts = count_concrete_opcodes(concrete)
 
-    # Inflight window: all-bank ops are serialized by the controller so stay
-    # at width 1. per_kind/per_bank auto-scale to span all banks.
+    # All-bank ops are serialized by the controller; per-bank modes can span banks.
     effective_inflight = max_inflight_requests
     if interleave_banks and mac_mode in ("per_kind", "per_bank"):
         max_span = max(
@@ -265,9 +253,6 @@ def generate_and_replay(
         "opcode_counts": opcode_counts,
         **result,
     }
-
-
-# ── Analytical prefill formula (no simulation) ─────────────────────────
 
 
 def _ceil_div(n: int, d: int) -> int:
@@ -314,7 +299,6 @@ def _infer_model_family(name: str) -> str:
 
 
 def prefill_formula(model_key: str, *, prompt_len: int) -> dict:
-    """Analytical prefill PIM_MAC counts per layer (no simulation)."""
     from ramulator.dram.lpddr5_pim import PIM_DATATYPE_RESOURCES
     from ramulator.workload_surrogate.generate_full_transformer import (
         FFN_VARIANT_PROJECTION_COUNTS, get_dense_prefill_manifests, get_model_spec)
