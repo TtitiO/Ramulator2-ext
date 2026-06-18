@@ -3,7 +3,7 @@
 
 Two targets, matching the two artifacts in the paper:
 
-    cross-model   Fig. f4_cross_model_cycles  (15 decode + 14 prefill configs,
+    cross-model   Fig. cross_model_cycles     (15 decode + 14 prefill configs,
                   cold-start vs steady-state).  Data: decode_prefill_cycles_parts/
     pim-sharing   Table tab:pim-sharing        (per-bank b=1 vs shared b=2).
                   Data: pim_sharing_parts/
@@ -40,6 +40,7 @@ import matplotlib.pyplot as plt
 
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "results"
 FIGURE_DIRNAME = "figures"
+CROSS_MODEL_FIGURE_NAME = "cross_model_cycles"
 DECODE_JSON = "decode_cycles.json"
 PREFILL_JSON = "prefill_cycles.json"
 PIM_SHARING_JSON = "pim_sharing_comparison.json"
@@ -85,7 +86,7 @@ def _save(fig: plt.Figure, output_dir: Path, name: str) -> None:
     for ext in ("pdf", "png"):
         path = output_dir / f"{name}.{ext}"
         fig.savefig(path, dpi=300, bbox_inches="tight", pad_inches=0.06)
-        print(f"saved {path}")
+        print(f"saved figure: {path}")
     plt.close(fig)
 
 
@@ -156,7 +157,8 @@ def collect_cross_model(output_dir: Path, *, force: bool = False, workers: int =
     decode_path = output_dir / DECODE_JSON
     prefill_path = output_dir / PREFILL_JSON
     if not force and decode_path.exists() and prefill_path.exists():
-        print(f"using existing {decode_path} and {prefill_path}")
+        print(f"[cross-model] using existing data: {decode_path}, {prefill_path}")
+        print(f"[cross-model] part cache: {output_dir / CROSS_MODEL_PARTS_DIRNAME}")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / CROSS_MODEL_PARTS_DIRNAME).mkdir(parents=True, exist_ok=True)
@@ -189,11 +191,18 @@ def collect_cross_model(output_dir: Path, *, force: bool = False, workers: int =
     total = len(tasks)
     expected = (len(CROSS_MODEL_DECODE_MODELS) + len(CROSS_MODEL_PREFILL_MODELS)) * 2
     if expected - total > 0:
-        print(f"[cross-model] {expected - total} parts already cached, {total} remaining", flush=True)
+        print(
+            f"[cross-model] {expected - total} parts already cached in "
+            f"{output_dir / CROSS_MODEL_PARTS_DIRNAME}; {total} remaining",
+            flush=True)
     if total > 0:
-        print(f"[cross-model] collecting {total} simulation points with {workers} workers", flush=True)
+        print(
+            f"[cross-model] collecting {total} simulation points with {workers} workers; "
+            f"data -> {decode_path}, {prefill_path}",
+            flush=True)
         _run_tasks(tasks, workers, _run_cross_model_task,
-                   lambda t: f"{t['model_key']} {t['phase']} {t['mode']}", "cross-model")
+                   lambda t: f"{t['model_key']} {t['phase']} {t['mode']} -> {t['part_path']}",
+                   "cross-model")
 
     _assemble_cross_model(output_dir, decode_path, prefill_path)
 
@@ -316,9 +325,16 @@ def render_cross_model(output_dir: Path) -> None:
         paper_figures = _load_paper_figure_module()
         paper_figures.CROSS_MODEL_DECODE_CACHE = output_dir / DECODE_JSON
         paper_figures.CROSS_MODEL_PREFILL_CACHE = output_dir / PREFILL_JSON
-        paper_figures.gen_f4(output_dir / FIGURE_DIRNAME)
+        figure_dir = output_dir / FIGURE_DIRNAME
+        paper_figures.gen_f4(figure_dir)
+        for ext in ("pdf", "png"):
+            legacy_path = figure_dir / f"f4_{CROSS_MODEL_FIGURE_NAME}.{ext}"
+            path = figure_dir / f"{CROSS_MODEL_FIGURE_NAME}.{ext}"
+            if legacy_path.exists():
+                legacy_path.replace(path)
+                print(f"saved figure: {path}")
         return
-    except (ImportError, ModuleNotFoundError):
+    except (FileNotFoundError, ImportError, ModuleNotFoundError):
         pass
 
     C_BAR_A = "#b8c8dc"
@@ -367,7 +383,7 @@ def render_cross_model(output_dir: Path) -> None:
     fig.subplots_adjust(left=0.06, right=0.995, bottom=0.32, top=0.88, wspace=0.15)
     _panel(fig.add_subplot(1, 2, 1), d_rows, title="(a) Decode backend cycles")
     _panel(fig.add_subplot(1, 2, 2), p_rows, title="(b) Prefill backend cycles", ylabel=False)
-    _save(fig, output_dir / FIGURE_DIRNAME, "f4_cross_model_cycles")
+    _save(fig, output_dir / FIGURE_DIRNAME, CROSS_MODEL_FIGURE_NAME)
 
 
 # ── pim-sharing — per-bank (b=1) vs two-bank shared (b=2) decode table ──
@@ -409,7 +425,8 @@ def _run_pim_sharing_task(task: dict) -> dict:
 def collect_pim_sharing(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
     path = output_dir / PIM_SHARING_JSON
     if not force and path.exists():
-        print(f"using existing {path}")
+        print(f"[pim-sharing] using existing data: {path}")
+        print(f"[pim-sharing] part cache: {output_dir / PIM_SHARING_PARTS_DIRNAME}")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / PIM_SHARING_PARTS_DIRNAME).mkdir(parents=True, exist_ok=True)
@@ -429,11 +446,18 @@ def collect_pim_sharing(output_dir: Path, *, force: bool = False, workers: int =
     total = len(tasks)
     expected = len(PIM_SHARING_WORKLOADS) * len(PIM_CONFIGS)
     if expected - total > 0:
-        print(f"[pim-sharing] {expected - total} parts already cached, {total} remaining", flush=True)
+        print(
+            f"[pim-sharing] {expected - total} parts already cached in "
+            f"{output_dir / PIM_SHARING_PARTS_DIRNAME}; {total} remaining",
+            flush=True)
     if total > 0:
-        print(f"[pim-sharing] collecting {total} simulation points with {workers} workers", flush=True)
+        print(
+            f"[pim-sharing] collecting {total} simulation points with {workers} workers; "
+            f"data -> {path}",
+            flush=True)
         _run_tasks(tasks, workers, _run_pim_sharing_task,
-                   lambda t: f"{t['model_key']} {t['pim_label']}", "pim-sharing")
+                   lambda t: f"{t['model_key']} {t['pim_label']} -> {t['part_path']}",
+                   "pim-sharing")
 
     _assemble_pim_sharing(output_dir, path)
 
