@@ -157,7 +157,6 @@ class LPDDR5PIMController : public ControllerBase {
   double s_pim_compute_energy_pJ_per_mac = 0.0;
   double s_pim_array_local_energy_pJ = 0.0;
   double s_pim_cell_to_pim_energy_pJ_per_256b = 0.0;
-  double s_pim_interconnect_energy_pJ_per_256b = 0.0;
   double s_pim_vrf_access_energy_pJ = 0.0;
   double s_pim_srf_access_energy_pJ = 0.0;
   double s_pim_mode_switch_energy_pJ = 0.0;
@@ -293,7 +292,6 @@ void LPDDR5PIMController::init() {
   s_pim_compute_energy_pJ_per_mac = spec.pim_compute_energy_pJ_per_mac;
   s_pim_array_local_energy_pJ = spec.pim_array_local_energy_pJ;
   s_pim_cell_to_pim_energy_pJ_per_256b = spec.pim_cell_to_pim_energy_pJ_per_256b;
-  s_pim_interconnect_energy_pJ_per_256b = spec.pim_interconnect_energy_pJ_per_256b;
   s_pim_vrf_access_energy_pJ = spec.pim_vrf_access_energy_pJ;
   s_pim_srf_access_energy_pJ = spec.pim_srf_access_energy_pJ;
   s_pim_mode_switch_energy_pJ = spec.pim_mode_switch_energy_pJ;
@@ -360,7 +358,6 @@ void LPDDR5PIMController::setup(IFrontEnd* frontend, IMemorySystem* memory_syste
   m_stats.add("pim_compute_energy_pJ_per_mac", s_pim_compute_energy_pJ_per_mac);
   m_stats.add("pim_array_local_energy_pJ", s_pim_array_local_energy_pJ);
   m_stats.add("pim_cell_to_pim_energy_pJ_per_256b", s_pim_cell_to_pim_energy_pJ_per_256b);
-  m_stats.add("pim_interconnect_energy_pJ_per_256b", s_pim_interconnect_energy_pJ_per_256b);
   m_stats.add("pim_vrf_access_energy_pJ", s_pim_vrf_access_energy_pJ);
   m_stats.add("pim_srf_access_energy_pJ", s_pim_srf_access_energy_pJ);
   m_stats.add("pim_mode_switch_energy_pJ", s_pim_mode_switch_energy_pJ);

@@ -286,43 +286,16 @@ def lower_semantic_records_to_concrete(
 ) -> list[dict]:
     """Lower Phase 2 semantic records into native LPDDR5-PIM concrete opcodes.
 
-    This is an offline compiler stage. HostRead/HostWrite lower to concrete READ
-    and WRITE requests. Barrier/Drain become provenance/order annotations only;
-    concrete ordering is expressed by legal host requests and LPDDR5-PIM
-    mode/control opcodes. Phase 4 semantic-only accounting stages such as
-    AttentionSoftmax, PIMElementwise, TopK, dispatch, and combine intentionally do
-    not lower to fake hardware commands.
+    mac_mode controls emit strategy:
+      "per_kind" (default): weight-stationary ops (FFN/proj/MoE) → all-bank
+        PIM_MAC_AB; data-stationary ops (attention) → per-bank PIM_MAC.
+      "all_bank": force every compute kind through PIM_MAC_AB.
+      "per_bank": force every compute kind through per-bank PIM_MAC.
 
-    By default, weight PIMDataMove records (operand_role="weight") are NOT lowered
-    to concrete opcodes (weights are resident/preloaded_stationary in steady-state
-    inference).  Pass materialize_weights=True for cold-start preload or frontend
-    stress-test replay; materialized weights lower to regular concrete WRITE
-    records, not PIM_BCAST, because PIM_BCAST is reserved for common all-bank
-    setup/broadcast payloads rather than per-bank resident weight preload.
-
-    When *interleave_banks* is True, PIM_MAC records for a multi-bank semantic are
-    emitted as ONE compact record per compute group carrying in-memory interleaving
-    fields (``bank_sequence``, ``dependency_count``, ``interleave_depth``, etc.).
-    The C++ concrete frontend expands the compact record into N round-robin issues
-    at replay time — zero file growth, zero per-bank record explosion.  This
-    enables the shared-MPU contention model to fire when pim_banks_per_mpu > 1
-    (k=2 vs k=1 comparison).  Keep False (the default) for serial-latency figures
-    (F4/F5/F6).
-
-    *mac_mode* controls how interleaved per-bank compute is emitted:
-    ``"per_kind"`` (default) dispatches on the semantic kind's physical operand
-    residency: WEIGHT_STATIONARY_COMPUTE_KINDS (FFN/projection/MoE) lower to the
-    all-bank broadcast ``PIM_MAC_AB`` path, while DATA_STATIONARY_COMPUTE_KINDS
-    (attention score/context) lower to per-bank ``PIM_MAC``.  This is the
-    physically faithful model — a single trace mixes both primitives.
-    ``"all_bank"`` forces every compute kind through the broadcast path and
-    ``"per_bank"`` forces every compute kind through the per-bank path; both are
-    research overrides for isolating one primitive.  The all-bank path emits
-    HAB → PIM_BCAST → HAB_PIM → PIM_MAC_AB×n → SB, conserving total arithmetic as
-    ``n = ceil(total_macs / bank_count)``; the controller's banks_per_mpu-scaled
-    AB latency then differentiates k=1 vs k=2.  Note ``per_bank`` and ``per_kind``
-    coincide for attention; ``all_bank`` and ``per_kind`` coincide for FFN/MoE.
-    """
+    With interleave_banks=True, multi-bank PIM_MAC ops emit as ONE compact
+    record with in-memory interleaving fields — the C++ frontend expands them
+    at replay time.  Set materialize_weights=True to emit host-WRITE preload
+    records for cold-start experiments (default steady-state skips weights)."""
     records: list[dict] = []
     next_id = 0
     mode = "SB"

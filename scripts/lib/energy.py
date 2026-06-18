@@ -1,4 +1,4 @@
-"""Small stats extractor for the paper-facing LPDDR5-PIM figures."""
+"""Stats extraction helpers for LPDDR5-PIM figures."""
 
 from __future__ import annotations
 
@@ -13,14 +13,7 @@ def _nested(stats: dict, *keys: str, default=None):
 
 
 def extract_pim_stats(stats: dict, time_unit_ns: float) -> dict:
-    """Extract only the Ramulator stats used by F2-F5.
-
-    Expected keys are under ``memory_system.controller``: ``cycles``,
-    ``avg_pim_latency``, ``num_pim_reqs_served``/``num_issued_pim_mac`` and
-    optional PIM stall/resource counters.  Command counts are read from
-    ``evidence.pim_energy_observability.modeled.command_counts`` when the runner
-    attaches observability plugins.
-    """
+    """Pull the subset of Ramulator controller stats used by F2-F6."""
     ctrl = _nested(stats, "memory_system", "controller", default={}) or {}
     frontend = stats.get("frontend", {}) if isinstance(stats.get("frontend", {}), dict) else {}
     cycles = int(ctrl.get("cycles", 0) or 0)
@@ -33,12 +26,7 @@ def extract_pim_stats(stats: dict, time_unit_ns: float) -> dict:
         or 0
     )
     command_counts = _nested(
-        stats,
-        "evidence",
-        "pim_energy_observability",
-        "modeled",
-        "command_counts",
-        default={},
+        stats, "evidence", "pim_energy_observability", "modeled", "command_counts", default={},
     ) or {}
     throughput = (served / total_time_ns) if total_time_ns > 0 else 0.0
 

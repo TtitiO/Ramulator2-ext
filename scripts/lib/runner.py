@@ -1,8 +1,4 @@
-"""Direct Ramulator runners used by scripts/gen_figures.py.
-
-These helpers intentionally instantiate the Ramulator Python components directly
-instead of importing the analysis test registry.
-"""
+"""Direct Ramulator2 runner — instantiate components without the test registry."""
 
 from __future__ import annotations
 
@@ -38,23 +34,9 @@ DEFAULT_CFG = {
 }
 
 COMMANDS_TO_COUNT = [
-    "ACT1",
-    "ACT2",
-    "CAS_RD",
-    "CAS_WR",
-    "RD",
-    "WR",
-    "RDA",
-    "WRA",
-    "SB",
-    "HAB",
-    "HAB_PIM",
-    "PIM_BCAST",
-    "PIM_MAC",
-    "PIM_MAC_AB",
-    "PREpb",
-    "PREab",
-    "REFab",
+    "ACT1", "ACT2", "CAS_RD", "CAS_WR", "RD", "WR", "RDA", "WRA",
+    "SB", "HAB", "HAB_PIM", "PIM_BCAST", "PIM_MAC", "PIM_MAC_AB",
+    "PREpb", "PREab", "REFab",
 ]
 
 
@@ -75,6 +57,11 @@ def _serialize_int_list(values) -> str:
 
 
 def _extract_dram_layout(dram) -> dict:
+    """Extract the device's multi-level bank decomposition from a DRAM object.
+
+    Returns bank_positions, bank_counts, and total_bank_units so callers can
+    map flat bank indices 0..N-1 into the addr_vec correctly.
+    """
     cls = type(dram)
     level_names = list(cls.levels.keys())
     org_dict, _ = dram.resolve()
@@ -148,15 +135,13 @@ def _read_command_traces(prefix: Path) -> list[dict]:
     for trace_path in sorted(prefix.parent.glob(f"{prefix.name}.ch*")):
         with trace_path.open(newline="", encoding="utf-8") as handle:
             commands = [row["command"] for row in csv.DictReader(handle)]
-        traces.append(
-            {
-                "path": str(trace_path),
-                "channel": trace_path.suffix.replace(".ch", ""),
-                "command_count": len(commands),
-                "command_counts": dict(sorted(Counter(commands).items())),
-                "commands_preview": commands[:12],
-            }
-        )
+        traces.append({
+            "path": str(trace_path),
+            "channel": trace_path.suffix.replace(".ch", ""),
+            "command_count": len(commands),
+            "command_counts": dict(sorted(Counter(commands).items())),
+            "commands_preview": commands[:12],
+        })
     return traces
 
 
@@ -165,9 +150,7 @@ def _attach_plugins(ramulator, tmpdir: Path):
     trace_prefix = tmpdir / "command_trace.csv"
     return [
         ramulator.controller_plugin.CommandCounter(
-            commands_to_count=COMMANDS_TO_COUNT,
-            path=str(counts_path),
-        ),
+            commands_to_count=COMMANDS_TO_COUNT, path=str(counts_path)),
         ramulator.controller_plugin.CmdTraceRecorder(path=str(trace_prefix)),
     ]
 
@@ -176,21 +159,12 @@ def _collect_observability(stats: dict, tmpdir: Path, cfg: dict) -> dict:
     ctrl = stats.get("memory_system", {}).get("controller", {})
     selected = {}
     for key in (
-        "cycles",
-        "num_pim_reqs_served",
-        "num_issued_pim_mac",
-        "avg_pim_latency",
-        "avg_pim_service_latency",
-        "avg_pim_launch_wait",
-        "avg_pim_response_latency",
-        "pim_capacity_stalls",
-        "pim_mpu_group_stalls",
-        "pim_dependency_stalls",
-        "pim_inflight_peak",
-        "pim_banks_per_mpu",
-        "pim_mpu_group_count",
-        "total_banks",
-        "effective_mpu_groups",
+        "cycles", "num_pim_reqs_served", "num_issued_pim_mac",
+        "avg_pim_latency", "avg_pim_service_latency",
+        "avg_pim_launch_wait", "avg_pim_response_latency",
+        "pim_capacity_stalls", "pim_mpu_group_stalls", "pim_dependency_stalls",
+        "pim_inflight_peak", "pim_banks_per_mpu", "pim_mpu_group_count",
+        "total_banks", "effective_mpu_groups",
     ):
         if key in ctrl:
             selected[key] = ctrl[key]
@@ -236,8 +210,8 @@ def run_single(
     dram = dram if dram is not None else _make_dram(ramulator, cfg)
     layout = _extract_dram_layout(dram)
     pim_request, pim_load, pim_compute_all = _pim_request_ids(
-        dram, split_all_bank=bool(cfg.get("pim_split_all_bank", False))
-    )
+        dram, split_all_bank=bool(cfg.get("pim_split_all_bank", False)))
+
     frontend = ramulator.frontend.LatencyThroughputTrace(
         clock_ratio=int(cfg["frontend_clock_ratio"]),
         nop_counter=int(nop),
@@ -269,5 +243,6 @@ def run_single(
         sim = ramulator.Simulation(frontend, mem)
         sim.run()
         stats = sim.stats
-        stats.setdefault("evidence", {})["pim_energy_observability"] = _collect_observability(stats, tmpdir, cfg)
+        stats.setdefault("evidence", {})["pim_energy_observability"] = \
+            _collect_observability(stats, tmpdir, cfg)
         return stats

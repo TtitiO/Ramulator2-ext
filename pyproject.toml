@@ -1,7 +1,10 @@
 [project]
 name = "ramulator2-ext"
 version = "0.1.0"
-description = "Add your description here"
+description = "LPDDR5-PIM backend extension and figure generation for Ramulator 2.0"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "matplotlib>=3.7",
+    "numpy>=1.24",
+]

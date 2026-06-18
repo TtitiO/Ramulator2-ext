@@ -1,4 +1,4 @@
-"""LPDDR5-PIM analysis configuration helpers."""
+"""LPDDR5-PIM round-robin sweep configuration."""
 
 from __future__ import annotations
 
@@ -7,45 +7,21 @@ from copy import deepcopy
 
 LPDDR5_ANALYSIS_POWER = {
     "enabled": True,
-    "VDD1": 1.80,
-    "VDD2H": 1.05,
-    "VDD2L": 0.90,
-    "VDDQ": 0.50,
-    "IDD01": 2.80,
-    "IDD02H": 32.00,
-    "IDD02L": 0.25,
-    "IDD0Q": 0.75,
-    "IDD2N1": 1.20,
-    "IDD2N2H": 16.00,
-    "IDD2N2L": 0.25,
-    "IDD2NQ": 0.75,
-    "IDD3N1": 1.20,
-    "IDD3N2H": 16.00,
-    "IDD3N2L": 0.25,
-    "IDD3NQ": 0.75,
-    "IDD4R1": 2.00,
-    "IDD4R2H": 18.00,
-    "IDD4R2L": 0.30,
-    "IDD4RQ": 0.85,
-    "IDD4W1": 2.10,
-    "IDD4W2H": 19.00,
-    "IDD4W2L": 0.35,
-    "IDD4WQ": 0.90,
-    "IDD5AB1": 2.20,
-    "IDD5AB2H": 35.00,
-    "IDD5AB2L": 0.25,
-    "IDD5ABQ": 0.75,
+    "VDD1": 1.80, "VDD2H": 1.05, "VDD2L": 0.90, "VDDQ": 0.50,
+    "IDD01": 2.80, "IDD02H": 32.00, "IDD02L": 0.25, "IDD0Q": 0.75,
+    "IDD2N1": 1.20, "IDD2N2H": 16.00, "IDD2N2L": 0.25, "IDD2NQ": 0.75,
+    "IDD3N1": 1.20, "IDD3N2H": 16.00, "IDD3N2L": 0.25, "IDD3NQ": 0.75,
+    "IDD4R1": 2.00, "IDD4R2H": 18.00, "IDD4R2L": 0.30, "IDD4RQ": 0.85,
+    "IDD4W1": 2.10, "IDD4W2H": 19.00, "IDD4W2L": 0.35, "IDD4WQ": 0.90,
+    "IDD5AB1": 2.20, "IDD5AB2H": 35.00, "IDD5AB2L": 0.25, "IDD5ABQ": 0.75,
 }
 
 
 def make_rr_cfg(active_banks: int, banks_per_mpu: int) -> dict:
-    """Return round-robin PIM cfg overrides for one sweep point family."""
-    if active_banks <= 0:
-        raise ValueError("active_banks must be positive")
-    if banks_per_mpu <= 0:
-        raise ValueError("banks_per_mpu must be positive")
+    """Build a round-robin PIM sweep config for one bank/BPM combination."""
+    if active_banks <= 0 or banks_per_mpu <= 0:
+        raise ValueError("active_banks and banks_per_mpu must be positive")
 
-    # The 8Gb preset exposes 16 bank units. Use two ranks for 32 active banks.
     rank = 2 if active_banks > 16 else 1
     return {
         "dram_kwargs": {

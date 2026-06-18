@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Collect and render LPDDR5-PIM paper figures F2-F5.
+"""Collect and render LPDDR5-PIM paper figures F2-F6 and the ftable comparison.
 
-Examples:
+Usage:
     python scripts/gen_figures.py --collect f2
-    python scripts/gen_figures.py --render f2
-    python scripts/gen_figures.py --all f2
+    python scripts/gen_figures.py --render f4
     python scripts/gen_figures.py --all
 """
 
@@ -20,8 +19,6 @@ from datetime import date
 from pathlib import Path
 from typing import Iterable
 
-
-# ── Path setup: make the script work from a clean checkout ────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 RAMULATOR2_DIR = PROJECT_ROOT / "ramulator2"
@@ -30,11 +27,12 @@ sys.path.insert(0, str(RAMULATOR2_DIR / "python"))
 sys.path.insert(0, str(RAMULATOR2_DIR))
 
 import matplotlib
-
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.ticker import FuncFormatter
 
-from lib.energy import extract_pim_stats
+from lib.energy import extract_pim_stats, _nested
 from lib.lpddr5_pim_cfg import make_rr_cfg
 from lib.runner import run_single
 
@@ -79,27 +77,25 @@ LBL_BPM = {1: "1 bank / PIM block", 2: "2 banks / PIM block", 4: "4 banks / PIM 
 
 
 def _apply_style() -> None:
-    plt.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 8.0,
-            "axes.titlesize": 9,
-            "axes.labelsize": 8.5,
-            "xtick.labelsize": 7.5,
-            "ytick.labelsize": 7.5,
-            "legend.fontsize": 7.5,
-            "axes.linewidth": 0.7,
-            "xtick.major.width": 0.7,
-            "ytick.major.width": 0.7,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
-            "figure.facecolor": "white",
-            "axes.facecolor": "white",
-            "savefig.dpi": 300,
-            "savefig.bbox": "tight",
-            "savefig.pad_inches": 0.06,
-        }
-    )
+    plt.rcParams.update({
+        "font.family": "DejaVu Sans",
+        "font.size": 8.0,
+        "axes.titlesize": 9,
+        "axes.labelsize": 8.5,
+        "xtick.labelsize": 7.5,
+        "ytick.labelsize": 7.5,
+        "legend.fontsize": 7.5,
+        "axes.linewidth": 0.7,
+        "xtick.major.width": 0.7,
+        "ytick.major.width": 0.7,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.dpi": 300,
+        "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.06,
+    })
 
 
 def _grid(ax: plt.Axes, axis: str = "y") -> None:
@@ -136,7 +132,7 @@ def _write_sweep_json(rows: list[dict], output_dir: Path) -> None:
     json_path = output_dir / SWEEP_JSON
     _write_json(json_path, {
         "schema_version": 1,
-        "description": "LPDDR5-PIM PIM-block mapping sweep: throughput and latency vs bank count, PIM-block sharing, and NOP",
+        "description": "LPDDR5-PIM PIM-block mapping sweep",
         "date": date.today().isoformat(),
         "rows": rows,
     })
@@ -162,27 +158,16 @@ def _load_paper_figure_module():
 
 def _time_unit_ns() -> float:
     import ramulator
-
     dram = ramulator.dram.LPDDR5PIM(
         org_preset="LPDDR5_8Gb_x16",
         timing_preset="LPDDR5_6400",
-        pim_enabled=True,
-        pim_mode="bank",
-        pim_datatype="int8",
-    )
+        pim_enabled=True, pim_mode="bank", pim_datatype="int8")
     _, timing = dram.resolve()
     return float(timing["tCK_ps"]) / 1000.0
 
 
-def _row_from_stats(
-    *,
-    figure: str,
-    active_banks: int,
-    banks_per_mpu: int,
-    nop: int,
-    stats: dict,
-    time_unit_ns: float,
-) -> dict:
+def _row_from_stats(*, figure: str, active_banks: int, banks_per_mpu: int,
+                    nop: int, stats: dict, time_unit_ns: float) -> dict:
     extracted = extract_pim_stats(stats, time_unit_ns)
     command_counts = extracted.pop("command_counts")
     row = {
@@ -202,49 +187,42 @@ def _collect_sweep_point(task: dict) -> dict:
     bpm = int(task["banks_per_mpu"])
     nop = int(task["nop"])
     time_unit_ns = float(task["time_unit_ns"])
-    stats = run_single(cfg_override=make_rr_cfg(active_banks, bpm), nop=nop, num_probes=4096, warmup=10000)
+    stats = run_single(
+        cfg_override=make_rr_cfg(active_banks, bpm),
+        nop=nop, num_probes=4096, warmup=10000)
     return _row_from_stats(
-        figure="f2_f3",
-        active_banks=active_banks,
-        banks_per_mpu=bpm,
-        nop=nop,
-        stats=stats,
-        time_unit_ns=time_unit_ns,
-    )
+        figure="f2_f3", active_banks=active_banks, banks_per_mpu=bpm,
+        nop=nop, stats=stats, time_unit_ns=time_unit_ns)
 
+
+# F2 / F3 — shared-MPU sweep -------------------------------------------------
 
 def collect_f2(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
-    """Collect the shared F2/F3 LPDDR5-PIM sweep as JSON."""
     if not force and (output_dir / SWEEP_JSON).exists():
-        print(f"using existing {(output_dir / SWEEP_JSON)}")
+        print(f"using existing {output_dir / SWEEP_JSON}")
         return
 
     time_unit_ns = _time_unit_ns()
     tasks = [
-        {"active_banks": active_banks, "banks_per_mpu": bpm, "nop": nop, "time_unit_ns": time_unit_ns}
-        for active_banks in BANK_COUNTS
-        for bpm in BANKS_PER_MPU
-        for nop in NOP_VALUES
-    ]
+        {"active_banks": ab, "banks_per_mpu": bpm, "nop": nop, "time_unit_ns": time_unit_ns}
+        for ab in BANK_COUNTS for bpm in BANKS_PER_MPU for nop in NOP_VALUES]
     rows: list[dict] = []
+
     if workers <= 1:
         for index, task in enumerate(tasks, start=1):
             rows.append(_collect_sweep_point(task))
-            print(
-                f"[f2/f3] {index}/{len(tasks)}: banks={task['active_banks']} bpm={task['banks_per_mpu']} nop={task['nop']}",
-                flush=True,
-            )
+            print(f"[f2/f3] {index}/{len(tasks)}: banks={task['active_banks']} "
+                  f"bpm={task['banks_per_mpu']} nop={task['nop']}", flush=True)
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             future_to_task = {pool.submit(_collect_sweep_point, task): task for task in tasks}
             for index, future in enumerate(as_completed(future_to_task), start=1):
                 task = future_to_task[future]
                 rows.append(future.result())
-                print(
-                    f"[f2/f3] {index}/{len(tasks)}: banks={task['active_banks']} bpm={task['banks_per_mpu']} nop={task['nop']}",
-                    flush=True,
-                )
-    rows.sort(key=lambda row: (int(row["active_banks"]), int(row["pim_banks_per_mpu"]), int(row["nop"])))
+                print(f"[f2/f3] {index}/{len(tasks)}: banks={task['active_banks']} "
+                      f"bpm={task['banks_per_mpu']} nop={task['nop']}", flush=True)
+
+    rows.sort(key=lambda r: (int(r["active_banks"]), int(r["pim_banks_per_mpu"]), int(r["nop"])))
     _write_sweep_json(rows, output_dir)
 
 
@@ -266,9 +244,10 @@ def render_f2(output_dir: Path) -> None:
     for bpm in BANKS_PER_MPU:
         if not data[bpm]:
             continue
-        xs = [point[0] for point in data[bpm]]
-        ys = [point[1] for point in data[bpm]]
-        ax.plot(xs, ys, marker=M_BPM[bpm], color=C_BPM[bpm], linestyle=L_BPM[bpm], lw=1.8, ms=5, label=LBL_BPM[bpm])
+        xs = [p[0] for p in data[bpm]]
+        ys = [p[1] for p in data[bpm]]
+        ax.plot(xs, ys, marker=M_BPM[bpm], color=C_BPM[bpm], linestyle=L_BPM[bpm],
+                lw=1.8, ms=5, label=LBL_BPM[bpm])
     ax.set_xlabel("Active banks")
     ax.set_ylabel("Throughput (requests/ns)")
     ax.set_xscale("log", base=2)
@@ -287,13 +266,14 @@ def render_f3(output_dir: Path) -> None:
         key = (int(row["active_banks"]), int(row["pim_banks_per_mpu"]))
         by_case.setdefault(key, {})[int(row["nop"])] = float(row["avg_pim_latency_ns"])
 
-    banks = [bank for bank in BANK_COUNTS if any((bank, bpm) in by_case for bpm in BANKS_PER_MPU)]
+    banks = [b for b in BANK_COUNTS if any((b, bpm) in by_case for bpm in BANKS_PER_MPU)]
     if not banks:
         raise ValueError("sweep has no F3 rows")
     ncols = 2 if len(banks) > 1 else 1
     nrows = (len(banks) + ncols - 1) // ncols
     fig, axes_grid = plt.subplots(nrows, ncols, figsize=(3.7 * ncols, 2.8 * nrows), sharey=False)
     axes_flat = list(getattr(axes_grid, "flat", [axes_grid]))
+
     for ax, active_banks in zip(axes_flat, banks):
         values_all: list[float] = []
         for bpm in BANKS_PER_MPU:
@@ -303,7 +283,8 @@ def render_f3(output_dir: Path) -> None:
             xs = sorted(series)
             ys = [series[nop] for nop in xs]
             values_all.extend(ys)
-            ax.plot(xs, ys, marker=M_BPM[bpm], color=C_BPM[bpm], linestyle=L_BPM[bpm], lw=1.8, ms=4, label=LBL_BPM[bpm])
+            ax.plot(xs, ys, marker=M_BPM[bpm], color=C_BPM[bpm], linestyle=L_BPM[bpm],
+                    lw=1.8, ms=4, label=LBL_BPM[bpm])
         ax.set_title(f"{active_banks} banks", pad=6)
         ax.set_xlabel("NOP (outstanding PIM requests)")
         if values_all:
@@ -311,20 +292,24 @@ def render_f3(output_dir: Path) -> None:
             margin = max((yhi - ylo) * 0.12, yhi * 0.02, 0.2)
             ax.set_ylim(ylo - margin, yhi + margin)
         _grid(ax, "both")
+
     axes_flat[0].set_ylabel("Average PIM latency (ns)")
     handles, labels = axes_flat[0].get_legend_handles_labels()
     for ax in axes_flat[len(banks):]:
         ax.axis("off")
     if len(axes_flat) > len(banks):
-        axes_flat[len(banks)].legend(handles, labels, loc="center", frameon=True, framealpha=0.95, edgecolor=C_EDGE)
+        axes_flat[len(banks)].legend(handles, labels, loc="center", frameon=True,
+                                      framealpha=0.95, edgecolor=C_EDGE)
     else:
-        fig.legend(handles, labels, loc="lower center", ncol=len(handles), frameon=True, framealpha=0.95, edgecolor=C_EDGE)
+        fig.legend(handles, labels, loc="lower center", ncol=len(handles),
+                   frameon=True, framealpha=0.95, edgecolor=C_EDGE)
     fig.tight_layout(pad=0.9)
     _save(fig, output_dir / FIGURE_DIRNAME, "f3_pim_latency_vs_nop")
 
 
+# ── F4 — cross-model decode + prefill cycles ────────────────────────────
+
 def _run_f4_task(task: dict) -> dict:
-    """Module-level worker for F4 parallel collection (must be picklable)."""
     from lib.backend_replay import generate_and_replay
 
     result = generate_and_replay(
@@ -334,25 +319,7 @@ def _run_f4_task(task: dict) -> dict:
         materialize_weights=task["materialize_weights"],
         pim_cfg_override=task.get("pim_cfg_override"),
         max_inflight_requests=task.get("max_inflight_requests", 1),
-        mac_mode=task.get("mac_mode", "per_kind"),
-    )
-    part_path = Path(task["part_path"])
-    part_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = part_path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(part_path)
-    return result
-
-
-def _run_f5_task(task: dict) -> dict:
-    """Module-level worker for F5 parallel collection (must be picklable)."""
-    from lib.backend_replay import generate_and_replay
-
-    result = generate_and_replay(
-        "prefill", "llama2-7b",
-        prompt_len=task["prompt_len"],
-        materialize_weights=task["materialize_weights"],
-    )
+        mac_mode=task.get("mac_mode", "per_kind"))
     part_path = Path(task["part_path"])
     part_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = part_path.with_suffix(".tmp")
@@ -362,11 +329,6 @@ def _run_f5_task(task: dict) -> dict:
 
 
 def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
-    """Collect F4 cross-model decode+prefill caches with full parallelism.
-
-    Each (model, phase, mode) is saved as a separate part file for incremental
-    resumability.  Only missing parts are re-simulated on restart.
-    """
     from lib.backend_replay import generate_and_replay, prefill_formula, _infer_model_family
     from ramulator.workload_surrogate.generate_full_transformer import get_model_spec
 
@@ -377,23 +339,19 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
         return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Models for decode (includes Mixtral)
     F4_DECODE_MODELS = (
         "llama2-7b", "llama2-13b", "llama2-70b",
         "opt-125m", "opt-350m", "opt-1.3b",
         "qwen25-7b", "qwen25-14b", "qwen25-32b", "qwen25-72b",
         "gemma-2b", "gemma-7b", "gemma2-9b", "gemma2-27b",
-        "mixtral-8x7b",
-    )
-    # Models for prefill (no Mixtral — no MoE prefill path)
+        "mixtral-8x7b")
     F4_PREFILL_MODELS = (
         "llama2-7b", "llama2-13b", "llama2-70b",
         "opt-125m", "opt-350m", "opt-1.3b",
         "qwen25-7b", "qwen25-14b", "qwen25-32b", "qwen25-72b",
-        "gemma-2b", "gemma-7b", "gemma2-9b", "gemma2-27b",
-    )
+        "gemma-2b", "gemma-7b", "gemma2-9b", "gemma2-27b")
     F4_PREFILL_PROMPT_LEN = 12
-    DECODE_PAST_LEN = 1024  # all models use past_len=1024 for the cross-model comparison
+    DECODE_PAST_LEN = 1024
 
     parts_dir = output_dir / "f4_parts"
     parts_dir.mkdir(parents=True, exist_ok=True)
@@ -402,14 +360,10 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
         safe = model.replace("-", "_").replace(".", "_")
         return parts_dir / f"{safe}__{phase}__{mode}.json"
 
-    # Build task list for all (model, phase, mode) combinations.
-    # F4 uses the paper's k=2 (LP-Spec shared-MPU, 2 banks/MPU) configuration with
-    # per-kind lowering: weight-stationary FFN/MoE/QKV → all-bank PIM_MAC_AB,
-    # data-stationary attention → per-bank PIM_MAC.  max_inflight_requests=16
-    # enables the per-record inflight window so attention banks parallelize.
     from lib.backend_replay import pim_cfg_shared
     f4_pim_cfg = pim_cfg_shared()
     tasks: list[dict] = []
+
     for model in F4_DECODE_MODELS:
         for mode in MODES:
             part = _part_path(model, "decode", mode)
@@ -419,11 +373,9 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                 "model_key": model, "phase": "decode", "mode": mode,
                 "past_len": DECODE_PAST_LEN,
                 "materialize_weights": mode == "cold_start",
-                "part_path": str(part),
-                "pim_cfg_override": f4_pim_cfg,
-                "max_inflight_requests": 16,
-                "mac_mode": "per_kind",
-            })
+                "part_path": str(part), "pim_cfg_override": f4_pim_cfg,
+                "max_inflight_requests": 16, "mac_mode": "per_kind"})
+
     for model in F4_PREFILL_MODELS:
         for mode in MODES:
             part = _part_path(model, "prefill", mode)
@@ -433,11 +385,8 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                 "model_key": model, "phase": "prefill", "mode": mode,
                 "prompt_len": F4_PREFILL_PROMPT_LEN,
                 "materialize_weights": mode == "cold_start",
-                "part_path": str(part),
-                "pim_cfg_override": f4_pim_cfg,
-                "max_inflight_requests": 16,
-                "mac_mode": "per_kind",
-            })
+                "part_path": str(part), "pim_cfg_override": f4_pim_cfg,
+                "max_inflight_requests": 16, "mac_mode": "per_kind"})
 
     total = len(tasks)
     cached = (len(F4_DECODE_MODELS) * 2 + len(F4_PREFILL_MODELS) * 2) - total
@@ -462,7 +411,7 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                     except Exception as exc:
                         print(f"[f4] FAILED {idx}/{total}: {task['model_key']} {task['phase']} {task['mode']}: {exc}", flush=True)
 
-    # Assemble decode cache
+    # Assemble decode rows
     decode_rows: list[dict] = []
     for model in F4_DECODE_MODELS:
         spec = get_model_spec(model) if model != "mixtral-8x7b" else None
@@ -487,20 +436,17 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                 "replay_status": "PASS" if data.get("replay_ok") else "FAIL",
                 "data_source": "backend_replay",
                 "dimension_scope": "real",
-                "source_cache": str(part),
-            })
-    decode_payload = {
+                "source_cache": str(part)})
+    _write_json(decode_path, {
         "figure_id": "fig18_cross_model_decode_cycles",
         "description": "Cross-model dense decode backend replay cycles",
         "phase": "decode",
         "metric_units": {"cycles": "cycles", "runtime_ns": "ns"},
         "provenance": {"date": date.today().isoformat(), "generator": "scripts/gen_figures.py"},
-        "rows": decode_rows,
-    }
-    _write_json(decode_path, decode_payload)
+        "rows": decode_rows})
     print(f"wrote {decode_path} ({len(decode_rows)} rows)")
 
-    # Assemble prefill cache
+    # Assemble prefill rows
     prefill_rows: list[dict] = []
     for model in F4_PREFILL_MODELS:
         formula = prefill_formula(model, prompt_len=F4_PREFILL_PROMPT_LEN)
@@ -533,15 +479,13 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                     "attention_issued_work_elements_per_layer", "score_tile_tokens",
                     "context_tile_tokens", "pim_mac_lanes", "primitive_ops_per_mac",
                     "per_layer_pim_mac_buckets", "kv_residency_policy",
-                    "model_total_layers",
-                )},
+                    "model_total_layers")},
                 "phase": "prefill",
                 "materialize_weights": mode == "cold_start",
                 "trace_name": f"{model}_prefill_P{F4_PREFILL_PROMPT_LEN}_{mode}",
                 "command_counts": data.get("opcode_counts", {}),
-                "pim_mac_density": 0.0,  # placeholder
-            })
-    prefill_payload = {
+                "pim_mac_density": 0.0})
+    _write_json(prefill_path, {
         "schema_version": 1,
         "figure_id": "fig22_cross_model_prefill_cycles",
         "description": "Cross-model dense prefill backend replay cycles",
@@ -550,18 +494,13 @@ def collect_f4(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
         "provenance": {"date": date.today().isoformat(), "generator": "scripts/gen_figures.py",
                        "prompt_len": F4_PREFILL_PROMPT_LEN},
         "rows": prefill_rows,
-        "caveats": ["Simulator-diagnostic cycles, not silicon-calibrated"],
-    }
-    _write_json(prefill_path, prefill_payload)
+        "caveats": ["Simulator-diagnostic cycles, not silicon-calibrated"]})
     print(f"wrote {prefill_path} ({len(prefill_rows)} rows)")
 
 
 def render_f4(output_dir: Path) -> None:
-    """Render F4 cross-model cycles figure.
-
-    Falls back to a standalone renderer when tests.analysis is unavailable
-    (e.g. anonymous-submission builds), producing an identical figure.
-    """
+    """Render F4 cross-model cycles. Falls back to standalone renderer when
+    paper/scripts/gen_paper_figures.py is unavailable."""
     try:
         paper_figures = _load_paper_figure_module()
         paper_figures.CROSS_MODEL_DECODE_CACHE = output_dir / F4_DECODE_JSON
@@ -569,10 +508,11 @@ def render_f4(output_dir: Path) -> None:
         paper_figures.gen_f4(output_dir / FIGURE_DIRNAME)
         return
     except (ImportError, ModuleNotFoundError):
-        pass  # fall through to standalone renderer below
+        pass
 
-    # Standalone renderer — no tests.analysis dependency.
-    C_BAR_A = "#b8c8dc"; C_BAR_B = "#d8c0b0"; C_EDGE = "#555555"; C_ANNOT = "0.35"
+    # Standalone renderer
+    C_BAR_A = "#b8c8dc"
+    C_BAR_B = "#d8c0b0"
 
     def _cycles_label(v: float) -> str:
         if v >= 1e9: return f"{v/1e9:.1f}B"
@@ -587,7 +527,9 @@ def render_f4(output_dir: Path) -> None:
                 order.append(n)
         by = {(str(r.get("model_name", "?")), str(r.get("mode", "steady_state"))): r for r in rows}
         modes = [("steady_state", "Steady", C_BAR_A), ("cold_start", "Cold", C_BAR_B)]
-        x = list(range(len(order))); w = 0.34; vals_all: list[float] = []
+        x = list(range(len(order)))
+        w = 0.34
+        vals_all: list[float] = []
         for idx, (mode, label, color) in enumerate(modes):
             off = [p + (idx - 0.5) * w for p in x]
             vals = [float(by.get((n, mode), {}).get("cycles", 0) or 0) for n in order]
@@ -606,8 +548,7 @@ def render_f4(output_dir: Path) -> None:
         if ylabel:
             ax.set_ylabel("Backend cycles")
         ax.set_title(title, pad=8)
-        ax.legend(loc="upper left", bbox_to_anchor=(0.0, 1.12),
-                  frameon=False, handlelength=1.0)
+        ax.legend(loc="upper left", bbox_to_anchor=(0.0, 1.12), frameon=False, handlelength=1.0)
         _grid(ax, "y")
 
     d_rows = json.loads((output_dir / F4_DECODE_JSON).read_text("utf-8"))["rows"]
@@ -619,11 +560,24 @@ def render_f4(output_dir: Path) -> None:
     _save(fig, output_dir / FIGURE_DIRNAME, "f4_cross_model_cycles")
 
 
-def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
-    """Collect F5 Llama2-7B prefill prompt-sweep with incremental caching.
+# ── F5 — prefill prompt-length sweep ────────────────────────────────────
 
-    Each (prompt_len, mode) is saved as a part file for resumability.
-    """
+def _run_f5_task(task: dict) -> dict:
+    from lib.backend_replay import generate_and_replay
+
+    result = generate_and_replay(
+        "prefill", "llama2-7b",
+        prompt_len=task["prompt_len"],
+        materialize_weights=task["materialize_weights"])
+    part_path = Path(task["part_path"])
+    part_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = part_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(part_path)
+    return result
+
+
+def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
     from lib.backend_replay import generate_and_replay, prefill_formula
 
     path = output_dir / F5_JSON
@@ -638,7 +592,6 @@ def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
     def _part_path(pl: int, mode: str) -> Path:
         return parts_dir / f"llama2_7b__P{pl}__{mode}.json"
 
-    # Build task list
     tasks: list[dict] = []
     for pl in F5_PROMPT_LENGTHS:
         for mode in MODES:
@@ -648,8 +601,7 @@ def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
             tasks.append({
                 "prompt_len": pl, "mode": mode,
                 "materialize_weights": mode == "cold_start",
-                "part_path": str(part),
-            })
+                "part_path": str(part)})
 
     total = len(tasks)
     cached = len(F5_PROMPT_LENGTHS) * len(MODES) - total
@@ -674,7 +626,7 @@ def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                     except Exception as exc:
                         print(f"[f5] FAILED {idx}/{total}: P={task['prompt_len']} {task['mode']}: {exc}", flush=True)
 
-    # Assemble F5 cache
+    # Assemble rows
     rows: list[dict] = []
     for pl in F5_PROMPT_LENGTHS:
         formula = prefill_formula("llama2-7b", prompt_len=pl)
@@ -692,16 +644,14 @@ def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
             pim_bcast = int(data.get("pim_bcast_issued", 0))
             cycles = int(data["cycles"])
             runtime_ns = float(data["runtime_ns"])
-            # pim_mac_density = pim_mac_cycles / total_cycles (approximate)
-            density = (pim_mac * 4) / cycles if cycles > 0 else 0.0  # 4 = mac_interval
+            density = (pim_mac * 4) / cycles if cycles > 0 else 0.0
 
             rows.append({
-                "prompt_len": pl,
-                "mode": mode,
+                "prompt_len": pl, "mode": mode,
                 "status": "PASS" if data.get("replay_ok") else "FAIL",
                 "runtime_ns": runtime_ns,
                 "cycles": cycles,
-                "pim_mac": total_pim_mac_per_layer * nl,  # analytical total
+                "pim_mac": total_pim_mac_per_layer * nl,
                 "pim_bcast": pim_bcast,
                 "pim_mac_density": density,
                 "prefill_causal_pairs": formula["prefill_causal_pairs"],
@@ -716,39 +666,123 @@ def collect_f5(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                 "materialize_weights": mode == "cold_start",
                 "controller_pim_mac_issued": pim_mac,
                 "concrete_opcode_counts_replay_input": data.get("opcode_counts", {}),
-                "avg_pim_latency_cycles": 0,  # not tracked in this replay mode
-            })
+                "avg_pim_latency_cycles": 0})
 
-    payload = {
+    _write_json(path, {
         "schema_version": 1,
         "figure_id": "fig21_llama2_7b_prefill_prompt_sweep",
         "description": "Llama2-7B full-depth prefill backend replay across prompt lengths",
-        "model": "Llama2-7B",
-        "phase": "prefill",
+        "model": "Llama2-7B", "phase": "prefill",
         "sweep": {"prompt_len_values": list(F5_PROMPT_LENGTHS), "modes": list(MODES)},
         "provenance": {"date": date.today().isoformat(), "generator": "scripts/gen_figures.py"},
         "rows": rows,
-        "caveats": ["Simulator-diagnostic cycles, not silicon-calibrated"],
-    }
-    _write_json(path, payload)
+        "caveats": ["Simulator-diagnostic cycles, not silicon-calibrated"]})
     print(f"wrote {path} ({len(rows)} rows)")
 
 
 def render_f5(output_dir: Path) -> None:
-    """Render F5 with paper/scripts/gen_paper_figures.py's renderer."""
-    paper_figures = _load_paper_figure_module()
-    paper_figures.PREFILL_PROMPT_SWEEP_CACHE = output_dir / F5_JSON
-    paper_figures.gen_f5(output_dir / FIGURE_DIRNAME)
+    try:
+        paper_figures = _load_paper_figure_module()
+        paper_figures.PREFILL_PROMPT_SWEEP_CACHE = output_dir / F5_JSON
+        paper_figures.gen_f5(output_dir / FIGURE_DIRNAME)
+        return
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    # Standalone renderer
+    path = output_dir / F5_JSON
+    if not path.exists():
+        print(f"  WARNING: missing {path} — run --collect f5 first")
+        return
+
+    from lib.backend_replay import prefill_formula
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    rows = [r for r in payload.get("rows", []) if isinstance(r, dict)]
+    model = str(payload.get("model", "Llama2-7B"))
+
+    steady = sorted([r for r in rows if str(r.get("mode")) == "steady_state"] or rows,
+                    key=lambda r: int(r["prompt_len"]))
+    if not steady:
+        print("  WARNING: empty sweep — skipping F5")
+        return
+
+    pls = [int(r["prompt_len"]) for r in steady]
+    attn = []
+    for r in steady:
+        pm = float(r["pim_mac"])
+        b = r.get("per_layer_pim_mac_buckets", {})
+        nl = float(r.get("num_layers", 1))
+        a = pm - float(b.get("qkvo_projection", 0)) * nl - float(b.get("ffn", 0)) * nl
+        if a <= 0 and "attention" in b:
+            a = float(b["attention"]) * nl
+        attn.append(max(a, 0))
+
+    ext_n, ext_a = [], []
+    if model == "Llama2-7B":
+        for pl_ext in [32, 64, 128, 256, 512]:
+            if pl_ext <= max(pls):
+                continue
+            try:
+                f = prefill_formula("llama2-7b", prompt_len=pl_ext)
+                bk = f.get("per_layer_pim_mac_buckets", {})
+                if isinstance(bk, dict) and "attention" in bk:
+                    ext_n.append(pl_ext)
+                    ext_a.append(float(bk["attention"]) * float(f["model_total_layers"]))
+            except Exception:
+                break
+
+    an, aa = pls + ext_n, attn + ext_a
+    fx = np.array(an, dtype=float)
+    fy = np.array(aa, dtype=float)
+    co = np.polyfit(fx, fy, 2) if len(fx) >= 3 else np.array([fy[-1] / fx[-1]**2, 0, 0])
+    fg = np.linspace(min(fx), max(fx), 200)
+    fv = np.polyval(co, fg)
+    ny = [v / (n * n) for n, v in zip(an, aa)]
+
+    fig = plt.figure(figsize=(5.0, 4.0))
+    gs = fig.add_gridspec(2, 1, height_ratios=[2.8, 1.0], hspace=0.12)
+    ax = fig.add_subplot(gs[0])
+    axn = fig.add_subplot(gs[1], sharex=ax)
+
+    ax.plot(pls, attn, "o-", color=C_BLUE, lw=1.6, ms=4, label="Backend-derived attention")
+    if ext_n:
+        ax.plot(ext_n, ext_a, "o--", color=C_BLUE, lw=1.0, ms=3,
+                markerfacecolor="white", label="Formula extension")
+    ax.plot(fg, fv, ":", color=C_COPPER, lw=1.6, label="Quadratic fit")
+    for n, v in zip(pls, attn):
+        ax.text(n, v * 1.06, f"{v/1e6:.1f}M" if v >= 1e6 else f"{v/1e3:.1f}K",
+                ha="center", va="bottom", fontsize=6, color=C_ANNOT)
+    for n, v in zip(ext_n, ext_a):
+        ax.text(n, v * 1.06, f"{v/1e6:.1f}M", ha="center", va="bottom",
+                fontsize=6, color=C_ANNOT)
+
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xlim(min(an) * 0.85, max(an) * 1.15)
+    ax.set_ylim(min(aa) * 0.5, max(aa) * 1.8)
+    ax.set_ylabel("Attention PIM MACs")
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda v, _: f"{v/1e6:.1f}M" if v >= 1e6 else f"{v/1e3:.0f}K"))
+    ax.set_title(f"Causal-attention quadratic scaling ({model} prefill)", pad=6)
+    ax.legend(frameon=False, handlelength=1.2)
+
+    axn.plot(an, ny, ".-", color=C_GREEN, lw=1.2, ms=3)
+    hi = max(1, len(ny) // 2)
+    ref = float(np.median(ny[hi:]))
+    axn.axhline(ref, color=C_REF, ls=":", lw=0.8)
+    axn.text(max(an) * 1.02, ref, f"{ref/1e3:.2f}K MACs/n²", fontsize=6, va="center", color=C_REF)
+    axn.set_xscale("log", base=2)
+    axn.set_xlabel("Prompt length n (tokens)")
+    axn.set_ylabel("PIM MACs / n²")
+    axn.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v/1e3:.1f}K"))
+    axn.set_xticks(sorted(set(an)), [str(n) for n in sorted(set(an))])
+
+    fig.tight_layout(pad=0.6)
+    _save(fig, output_dir / FIGURE_DIRNAME, "f5_prefill_attention_scaling")
 
 
-def _f6_nested(stats: dict, *keys: str, default=None):
-    cur = stats
-    for key in keys:
-        if not isinstance(cur, dict) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
-
+# ── F6 — parameter sensitivity ──────────────────────────────────────────
 
 def _f6_linear_fit(xs: list[float], ys: list[float]) -> dict:
     if len(xs) != len(ys) or len(xs) < 2:
@@ -784,20 +818,17 @@ def _f6_row_from_stats(task: dict, stats: dict, time_unit_ns: float) -> dict:
     memory_energy_pJ = float(energy_stats.get("total_energy", 0.0) or 0.0)
     pim_incremental_energy_pJ = float(energy_stats.get("total_incremental_cmd_energy", 0.0) or 0.0)
     total_energy_pJ = memory_energy_pJ + pim_incremental_energy_pJ
-    ops_per_request = float(
-        ctrl.get("pim_ops_per_request", ctrl.get("pim_ops_per_block_issue", 64.0)) or 64.0
-    )
+    ops_per_request = float(ctrl.get("pim_ops_per_request", ctrl.get("pim_ops_per_block_issue", 64.0)) or 64.0)
     lanes = float(ctrl.get("pim_lanes", 32.0) or 32.0)
     e_comp = float(task.get("e_comp_pJ_per_mac", ctrl.get("pim_compute_energy_pJ_per_mac", 0.0)) or 0.0)
     e_array_local = float(ctrl.get("pim_array_local_energy_pJ", 0.0) or 0.0)
     e_c2p = float(ctrl.get("pim_cell_to_pim_energy_pJ_per_256b", 0.0) or 0.0)
-    e_inter = float(ctrl.get("pim_interconnect_energy_pJ_per_256b", 0.0) or 0.0)
     e_vrf = float(ctrl.get("pim_vrf_access_energy_pJ", 0.0) or 0.0)
     e_srf = float(ctrl.get("pim_srf_access_energy_pJ", 0.0) or 0.0)
     pim_mac_events = pim_mac + pim_mac_ab
-    pim_event_energy_pJ = pim_mac_events * (e_array_local + lanes * e_comp + e_c2p + e_inter + e_vrf + e_srf)
+    pim_event_energy_pJ = pim_mac_events * (e_array_local + lanes * e_comp + e_c2p + e_vrf + e_srf)
 
-    row = {
+    return {
         "figure": "f6",
         "sweep": str(task["sweep"]),
         "active_banks": int(task.get("active_banks", F6_ACTIVE_BANKS)),
@@ -818,7 +849,6 @@ def _f6_row_from_stats(task: dict, stats: dict, time_unit_ns: float) -> dict:
         "pim_ops_per_request": ops_per_request,
         "pim_array_local_energy_pJ": e_array_local,
         "pim_cell_to_pim_energy_pJ_per_256b": e_c2p,
-        "pim_interconnect_energy_pJ_per_256b": e_inter,
         "pim_vrf_access_energy_pJ": e_vrf,
         "pim_srf_access_energy_pJ": e_srf,
         "pim_mpu_group_count": int(ctrl.get("pim_mpu_group_count", 0) or 0),
@@ -835,42 +865,31 @@ def _f6_row_from_stats(task: dict, stats: dict, time_unit_ns: float) -> dict:
         "total_energy_per_request_pJ": total_energy_pJ / served if served else 0.0,
         "pim_compute_event_energy_pJ": pim_mac_events * lanes * e_comp,
         "pim_parameterized_event_energy_pJ": pim_event_energy_pJ,
-        "simulated_ops_per_ns": (served * ops_per_request / total_time_ns) if total_time_ns > 0 else 0.0,
-    }
-    return row
+        "simulated_ops_per_ns": (served * ops_per_request / total_time_ns) if total_time_ns > 0 else 0.0}
 
 
 def _f6_pim_ops_roofline(rows: list[dict], time_unit_ns: float) -> dict:
     mapping = sorted((r for r in rows if r["sweep"] == "bank_mapping"), key=lambda r: r["pim_banks_per_mpu"])
-    pim_base = next(
-        (r for r in mapping if int(r["pim_banks_per_mpu"]) == F6_BASE_BANKS_PER_MPU),
-        mapping[0] if mapping else None,
-    )
+    pim_base = next((r for r in mapping if int(r["pim_banks_per_mpu"]) == F6_BASE_BANKS_PER_MPU),
+                    mapping[0] if mapping else None)
     if pim_base:
         ops_ceiling = float(pim_base["pim_ops_per_request"]) / time_unit_ns
         observed_ops = float(pim_base["simulated_ops_per_ns"])
         ratio = observed_ops / ops_ceiling if ops_ceiling > 0 else 0.0
     else:
-        ops_ceiling = 0.0
-        observed_ops = 0.0
-        ratio = 0.0
+        ops_ceiling = 0.0; observed_ops = 0.0; ratio = 0.0
     return {
         "name": "pim_mac_global_issue_ops",
         "observed_ops_per_ns": observed_ops,
         "theoretical_ops_per_ns": ops_ceiling,
-        "observed_GOPS": observed_ops,
-        "theoretical_GOPS": ops_ceiling,
-        "ratio": ratio,
-        "pass": ratio >= 0.95,
-        "ceiling_model": "one backend PIM request (one vector PIM_MAC command) per CK under 16-bank interleaving; ops/request / tCK",
-    }
+        "observed_GOPS": observed_ops, "theoretical_GOPS": ops_ceiling,
+        "ratio": ratio, "pass": ratio >= 0.95}
 
 
 def _collect_f6_pim_task(task: dict) -> dict:
     cfg = _f6_base_cfg(
         active_banks=int(task.get("active_banks", F6_ACTIVE_BANKS)),
-        banks_per_mpu=int(task.get("banks_per_mpu", F6_BASE_BANKS_PER_MPU)),
-    )
+        banks_per_mpu=int(task.get("banks_per_mpu", F6_BASE_BANKS_PER_MPU)))
     dram_kwargs = cfg.setdefault("dram_kwargs", {})
     if "nPIM_MAC_II" in task:
         dram_kwargs["nPIM_MAC_II"] = int(task["nPIM_MAC_II"])
@@ -881,55 +900,40 @@ def _collect_f6_pim_task(task: dict) -> dict:
     stats = run_single(
         cfg_override=cfg,
         nop=int(task.get("nop", F6_BASE_NOP)),
-        num_probes=F6_NUM_PIM_REQUESTS,
-        warmup=10000,
-    )
+        num_probes=F6_NUM_PIM_REQUESTS, warmup=10000)
     return _f6_row_from_stats(task, stats, float(task["time_unit_ns"]))
 
 
 def _run_f6_lpddr5_bandwidth_roofline(time_unit_ns: float, *, num_reads: int = F6_ROOFLINE_READS) -> dict:
     import ramulator
-
     from lib.runner import _extract_dram_layout
 
     dram = ramulator.dram.LPDDR5(
         org_preset="LPDDR5_8Gb_x16",
-        timing_preset="LPDDR5_6400",
-    )
+        timing_preset="LPDDR5_6400")
     org, timing = dram.resolve()
     tx_bytes = int(type(dram).internal_prefetch_size * int(org["channel_width"]) / 8)
     theoretical_bytes_per_ns = tx_bytes / (float(timing["nBL"]) * time_unit_ns)
     layout = _extract_dram_layout(dram)
     frontend = ramulator.frontend.LatencyThroughputTrace(
-        clock_ratio=4,
-        nop_counter=1,
-        num_probe_requests=1,
-        streaming_only=True,
-        num_streaming_requests=int(num_reads),
-        pim_mode=False,
-        stream_cols=int(layout["num_cols"]),
-        warmup_cycles=0,
-        read_ratio=100,
-        seed=12345,
-        **layout,
-    )
+        clock_ratio=4, nop_counter=1, num_probe_requests=1,
+        streaming_only=True, num_streaming_requests=int(num_reads),
+        pim_mode=False, stream_cols=int(layout["num_cols"]),
+        warmup_cycles=0, read_ratio=100, seed=12345, **layout)
     ctrl = ramulator.controller.LPDDR5(
         dram=dram,
         scheduler=ramulator.scheduler.FRFCFS(),
         refresh_manager=ramulator.refresh_manager.NoRefresh(),
         row_policy=ramulator.row_policy.Open(),
-        addr_mapper=ramulator.addr_mapper.PassThroughAddrMapper(),
-    )
+        addr_mapper=ramulator.addr_mapper.PassThroughAddrMapper())
     mem = ramulator.memory_system.GenericDRAM(
-        clock_ratio=1,
-        controllers=[ctrl],
-        channel_mapper=ramulator.channel_mapper.PassThroughChannelMapper(),
-    )
+        clock_ratio=1, controllers=[ctrl],
+        channel_mapper=ramulator.channel_mapper.PassThroughChannelMapper())
     sim = ramulator.Simulation(frontend, mem)
     sim.run()
     stats = sim.stats
 
-    ctrl_stats = _f6_nested(stats, "memory_system", "controller", default={}) or {}
+    ctrl_stats = _nested(stats, "memory_system", "controller", default={}) or {}
     frontend_stats = stats.get("frontend", {}) if isinstance(stats.get("frontend", {}), dict) else {}
     cycles = int(ctrl_stats.get("cycles", 0) or 0)
     runtime_ns = cycles * time_unit_ns
@@ -938,43 +942,38 @@ def _run_f6_lpddr5_bandwidth_roofline(time_unit_ns: float, *, num_reads: int = F
     ratio = observed_bytes_per_ns / theoretical_bytes_per_ns if theoretical_bytes_per_ns > 0 else 0.0
     return {
         "name": "lpddr5_row_hit_read_bandwidth",
-        "num_reads": int(num_reads),
-        "streaming_reads_sent": streamed,
-        "cycles": cycles,
-        "runtime_ns": runtime_ns,
-        "tx_bytes": tx_bytes,
-        "nBL": int(timing["nBL"]),
-        "tCK_ns": time_unit_ns,
+        "num_reads": int(num_reads), "streaming_reads_sent": streamed,
+        "cycles": cycles, "runtime_ns": runtime_ns,
+        "tx_bytes": tx_bytes, "nBL": int(timing["nBL"]), "tCK_ns": time_unit_ns,
         "observed_bytes_per_ns": observed_bytes_per_ns,
         "theoretical_bytes_per_ns": theoretical_bytes_per_ns,
-        "observed_GBps": observed_bytes_per_ns,
-        "theoretical_GBps": theoretical_bytes_per_ns,
-        "ratio": ratio,
-        "pass": ratio >= 0.98,
-        "ceiling_model": "LPDDR5 streaming-only row-hit READ issue stream; tx_bytes / (nBL * tCK)",
-    }
+        "observed_GBps": observed_bytes_per_ns, "theoretical_GBps": theoretical_bytes_per_ns,
+        "ratio": ratio, "pass": ratio >= 0.98}
 
 
 def _f6_checks(rows: list[dict], roofline: dict, time_unit_ns: float) -> dict:
     timing = sorted((r for r in rows if r["sweep"] == "timing"), key=lambda r: r["nPIM_MAC_II"])
     energy = sorted((r for r in rows if r["sweep"] == "energy"), key=lambda r: r["e_comp_pJ_per_mac"])
 
-    timing_base = next((r for r in timing if int(r["nPIM_MAC_II"]) == F6_TIMING_BASE_VALUE), timing[0] if timing else None)
+    timing_base = next((r for r in timing if int(r["nPIM_MAC_II"]) == F6_TIMING_BASE_VALUE),
+                       timing[0] if timing else None)
     timing_max_rel_error = 0.0
     if timing_base:
-        bx = float(timing_base["nPIM_MAC_II"])
-        by = float(timing_base["cycles"])
+        bx = float(timing_base["nPIM_MAC_II"]); by = float(timing_base["cycles"])
         for r in timing:
             expected = float(r["nPIM_MAC_II"]) / bx
             observed = float(r["cycles"]) / by if by else 0.0
             timing_max_rel_error = max(timing_max_rel_error, abs(observed - expected))
-    timing_fit = _f6_linear_fit([float(r["nPIM_MAC_II"]) for r in timing], [float(r["cycles"]) for r in timing])
+    timing_fit = _f6_linear_fit(
+        [float(r["nPIM_MAC_II"]) for r in timing],
+        [float(r["cycles"]) for r in timing])
 
     layer1_vals = [float(r["memory_energy_per_request_pJ"]) for r in energy]
     layer2_vals = [float(r["pim_incremental_energy_per_request_pJ"]) for r in energy]
     layer1_mean = sum(layer1_vals) / len(layer1_vals) if layer1_vals else 0.0
     layer1_rel_range = ((max(layer1_vals) - min(layer1_vals)) / layer1_mean) if layer1_mean else 0.0
-    layer2_fit = _f6_linear_fit([float(r["e_comp_pJ_per_mac"]) for r in energy], layer2_vals)
+    layer2_fit = _f6_linear_fit(
+        [float(r["e_comp_pJ_per_mac"]) for r in energy], layer2_vals)
 
     return {
         "timing_linear_fit": timing_fit,
@@ -983,53 +982,31 @@ def _f6_checks(rows: list[dict], roofline: dict, time_unit_ns: float) -> dict:
         "energy_layer2_linear_fit": layer2_fit,
         "roofline_pass": bool(
             roofline.get("lpddr5_bandwidth", {}).get("pass", False)
-            and roofline.get("pim_mac_ops", {}).get("pass", False)
-        ),
-    }
+            and roofline.get("pim_mac_ops", {}).get("pass", False))}
 
 
 def collect_f6(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
-    """Collect Fig. 6 parameter-sensitivity data and roofline checks."""
     path = output_dir / F6_JSON
     if not force and path.exists():
         print(f"using existing {path}")
         return
     output_dir.mkdir(parents=True, exist_ok=True)
     time_unit_ns = _time_unit_ns()
+
     tasks: list[dict] = []
-    tasks.extend(
-        {
-            "sweep": "timing",
-            "active_banks": F6_TIMING_ACTIVE_BANKS,
-            "banks_per_mpu": F6_BASE_BANKS_PER_MPU,
-            "nop": F6_BASE_NOP,
-            "nPIM_MAC_II": value,
-            "nPIM_MAC_LAT": F6_TIMING_ISOLATION_LAT,
-            "time_unit_ns": time_unit_ns,
-        }
-        for value in F6_TIMING_VALUES
-    )
-    tasks.extend(
-        {
-            "sweep": "energy",
-            "active_banks": F6_ACTIVE_BANKS,
-            "banks_per_mpu": F6_BASE_BANKS_PER_MPU,
-            "nop": F6_BASE_NOP,
-            "e_comp_pJ_per_mac": value,
-            "time_unit_ns": time_unit_ns,
-        }
-        for value in F6_E_COMP_VALUES
-    )
-    tasks.extend(
-        {
-            "sweep": "bank_mapping",
-            "active_banks": F6_ACTIVE_BANKS,
-            "banks_per_mpu": value,
-            "nop": F6_BASE_NOP,
-            "time_unit_ns": time_unit_ns,
-        }
-        for value in F6_BANKS_PER_MPU
-    )
+    tasks.extend({"sweep": "timing", "active_banks": F6_TIMING_ACTIVE_BANKS,
+                  "banks_per_mpu": F6_BASE_BANKS_PER_MPU, "nop": F6_BASE_NOP,
+                  "nPIM_MAC_II": v, "nPIM_MAC_LAT": F6_TIMING_ISOLATION_LAT,
+                  "time_unit_ns": time_unit_ns}
+                 for v in F6_TIMING_VALUES)
+    tasks.extend({"sweep": "energy", "active_banks": F6_ACTIVE_BANKS,
+                  "banks_per_mpu": F6_BASE_BANKS_PER_MPU, "nop": F6_BASE_NOP,
+                  "e_comp_pJ_per_mac": v, "time_unit_ns": time_unit_ns}
+                 for v in F6_E_COMP_VALUES)
+    tasks.extend({"sweep": "bank_mapping", "active_banks": F6_ACTIVE_BANKS,
+                  "banks_per_mpu": v, "nop": F6_BASE_NOP,
+                  "time_unit_ns": time_unit_ns}
+                 for v in F6_BANKS_PER_MPU)
 
     rows: list[dict] = []
     if workers <= 1:
@@ -1050,46 +1027,29 @@ def collect_f6(output_dir: Path, *, force: bool = False, workers: int = 1) -> No
                     print(f"[f6] FAILED {index}/{len(tasks)}: {task['sweep']} {task}: {exc}", flush=True)
         if failures:
             raise RuntimeError(f"F6 collection failed for {len(failures)} task(s)")
-    rows.sort(key=lambda row: (str(row["sweep"]), int(row["pim_banks_per_mpu"]), float(row["nPIM_MAC_II"]), float(row["e_comp_pJ_per_mac"])))
+
+    rows.sort(key=lambda r: (str(r["sweep"]), int(r["pim_banks_per_mpu"]),
+                              float(r["nPIM_MAC_II"]), float(r["e_comp_pJ_per_mac"])))
 
     roofline = {
         "lpddr5_bandwidth": _run_f6_lpddr5_bandwidth_roofline(time_unit_ns),
-        "pim_mac_ops": _f6_pim_ops_roofline(rows, time_unit_ns),
-    }
+        "pim_mac_ops": _f6_pim_ops_roofline(rows, time_unit_ns)}
     checks = _f6_checks(rows, roofline, time_unit_ns)
-    payload = {
+
+    _write_json(path, {
         "schema_version": 1,
         "figure_id": "f6_parameter_sensitivity",
-        "description": "LPDDR5-PIM parameter sensitivity: timing, PIM compute energy, bank mapping, and roofline checks",
+        "description": "LPDDR5-PIM parameter sensitivity and roofline checks",
         "provenance": {"date": date.today().isoformat(), "generator": "scripts/gen_figures.py"},
         "baseline": {
-            "active_banks": F6_ACTIVE_BANKS,
-            "timing_active_banks": F6_TIMING_ACTIVE_BANKS,
+            "active_banks": F6_ACTIVE_BANKS, "timing_active_banks": F6_TIMING_ACTIVE_BANKS,
             "timing_nPIM_MAC_LAT": F6_TIMING_ISOLATION_LAT,
-            "banks_per_mpu": F6_BASE_BANKS_PER_MPU,
-            "num_pim_requests": F6_NUM_PIM_REQUESTS,
-            "nop": F6_BASE_NOP,
-            "tCK_ns": time_unit_ns,
-        },
-        "sweeps": {
-            "nPIM_MAC_II": list(F6_TIMING_VALUES),
-            "e_comp_pJ_per_mac": list(F6_E_COMP_VALUES),
-            "banks_per_mpu": list(F6_BANKS_PER_MPU),
-        },
-        "roofline": roofline,
-        "checks": checks,
-        "rows": rows,
-        "caveats": [
-            "Simulator-diagnostic sensitivity, not silicon-calibrated device validation.",
-            f"Timing sweep uses one active bank and pins nPIM_MAC_LAT={F6_TIMING_ISOLATION_LAT} CK to isolate nPIM_MAC_II.",
-            "Energy Layer-1 denotes inherited LPDDR5 memory energy; Layer-2 denotes parameterized "
-            "PIM event energy only (e_array_local + lanes*e_comp + e_c2p + e_inter + e_VRF + e_SRF), "
-            "with zero defaults until coefficients are supplied.",
-            "Energy/EDP values are sensitivity diagnostics, not paper-facing calibrated quantitative claims.",
-            "PIM ops roofline uses the backend-visible one-PIM-request-per-CK issue ceiling under 16-bank interleaving.",
-        ],
-    }
-    _write_json(path, payload)
+            "banks_per_mpu": F6_BASE_BANKS_PER_MPU, "num_pim_requests": F6_NUM_PIM_REQUESTS,
+            "nop": F6_BASE_NOP, "tCK_ns": time_unit_ns},
+        "sweeps": {"nPIM_MAC_II": list(F6_TIMING_VALUES),
+                   "e_comp_pJ_per_mac": list(F6_E_COMP_VALUES),
+                   "banks_per_mpu": list(F6_BANKS_PER_MPU)},
+        "roofline": roofline, "checks": checks, "rows": rows})
     print(f"wrote {path} ({len(rows)} rows)")
 
 
@@ -1114,11 +1074,10 @@ def render_f6(output_dir: Path) -> None:
 
     fig, axes = plt.subplots(1, 3, figsize=(10.8, 3.1), sharey=False)
 
-    # (a) Timing sensitivity.
+    # (a) Timing sensitivity
     ax = axes[0]
     base = next((r for r in timing if int(r["nPIM_MAC_II"]) == F6_TIMING_BASE_VALUE), timing[0])
-    bx = float(base["nPIM_MAC_II"])
-    by = float(base["cycles"])
+    bx = float(base["nPIM_MAC_II"]); by = float(base["cycles"])
     xs = [float(r["nPIM_MAC_II"]) for r in timing]
     ys = [float(r["cycles"]) / by for r in timing]
     ideal = [x / bx for x in xs]
@@ -1134,7 +1093,7 @@ def render_f6(output_dir: Path) -> None:
     _grid(ax, "both")
     ax.legend(frameon=False, loc="lower right", handlelength=1.4)
 
-    # (b) Energy sensitivity.
+    # (b) Energy sensitivity
     ax = axes[1]
     ex = [float(r["e_comp_pJ_per_mac"]) for r in energy]
     l1 = [float(r["memory_energy_per_request_pJ"]) for r in energy]
@@ -1151,7 +1110,7 @@ def render_f6(output_dir: Path) -> None:
     _grid(ax, "both")
     ax.legend(frameon=False, loc="best", handlelength=1.4)
 
-    # (c) Bank mapping sensitivity.
+    # (c) Bank mapping sensitivity
     ax = axes[2]
     bpm = [int(r["pim_banks_per_mpu"]) for r in mapping]
     tp = [float(r["request_throughput"]) for r in mapping]
@@ -1182,24 +1141,24 @@ def render_f6(output_dir: Path) -> None:
     _save(fig, output_dir / FIGURE_DIRNAME, "f6_parameter_sensitivity")
 
 
-# ── Transformer-trace per-bank (k=1) vs shared (k=2) PIM comparison table ──
+# ── Transformer-trace k=1 vs k=2 PIM comparison table ──────────────────
 
 FTABLE_WORKLOADS = (
-    {"model_key": "llama2-7b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "llama2-13b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "llama2-70b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "opt-125m",     "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "opt-350m",     "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "opt-1.3b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "qwen25-7b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "qwen25-14b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "qwen25-32b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "qwen25-72b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "gemma-2b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "gemma-7b",     "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "gemma2-9b",    "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "gemma2-27b",   "phase": "decode", "past_len": 1024, "prompt_len": None},
-    {"model_key": "mixtral-8x7b", "phase": "decode", "past_len": 1024, "prompt_len": None},
+    {"model_key": "llama2-7b",    "phase": "decode", "past_len": 1024},
+    {"model_key": "llama2-13b",   "phase": "decode", "past_len": 1024},
+    {"model_key": "llama2-70b",   "phase": "decode", "past_len": 1024},
+    {"model_key": "opt-125m",     "phase": "decode", "past_len": 1024},
+    {"model_key": "opt-350m",     "phase": "decode", "past_len": 1024},
+    {"model_key": "opt-1.3b",     "phase": "decode", "past_len": 1024},
+    {"model_key": "qwen25-7b",    "phase": "decode", "past_len": 1024},
+    {"model_key": "qwen25-14b",   "phase": "decode", "past_len": 1024},
+    {"model_key": "qwen25-32b",   "phase": "decode", "past_len": 1024},
+    {"model_key": "qwen25-72b",   "phase": "decode", "past_len": 1024},
+    {"model_key": "gemma-2b",     "phase": "decode", "past_len": 1024},
+    {"model_key": "gemma-7b",     "phase": "decode", "past_len": 1024},
+    {"model_key": "gemma2-9b",    "phase": "decode", "past_len": 1024},
+    {"model_key": "gemma2-27b",   "phase": "decode", "past_len": 1024},
+    {"model_key": "mixtral-8x7b", "phase": "decode", "past_len": 1024},
 )
 
 PIM_CONFIGS = {
@@ -1209,7 +1168,6 @@ PIM_CONFIGS = {
 
 
 def _run_ftable_task(task: dict) -> dict:
-    """Module-level worker for ftable parallel collection (must be picklable)."""
     from lib.backend_replay import generate_and_replay
 
     result = generate_and_replay(
@@ -1219,8 +1177,7 @@ def _run_ftable_task(task: dict) -> dict:
         materialize_weights=task["materialize_weights"],
         pim_cfg_override=task["pim_cfg_override"],
         max_inflight_requests=task.get("max_inflight_requests", 16),
-        mac_mode=task.get("mac_mode", "per_bank"),
-    )
+        mac_mode=task.get("mac_mode", "per_bank"))
     part_path = Path(task["part_path"])
     part_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = part_path.with_suffix(".tmp")
@@ -1230,7 +1187,6 @@ def _run_ftable_task(task: dict) -> dict:
 
 
 def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -> None:
-    """Collect transformer-trace k=1 vs k=2 PIM comparison table."""
     path = output_dir / FTABLE_JSON
     if not force and path.exists():
         print(f"using existing {path}")
@@ -1244,7 +1200,6 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
         safe = model.replace("-", "_").replace(".", "_")
         return parts_dir / f"{safe}__{pim_label}.json"
 
-    # Build task list
     tasks: list[dict] = []
     for wl in FTABLE_WORKLOADS:
         for label, cfg in PIM_CONFIGS.items():
@@ -1252,17 +1207,12 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
             if not force and part.exists():
                 continue
             tasks.append({
-                "model_key": wl["model_key"],
-                "phase": wl["phase"],
+                "model_key": wl["model_key"], "phase": wl["phase"],
                 "past_len": wl["past_len"],
-                "prompt_len": wl["prompt_len"],
                 "materialize_weights": False,
                 "pim_cfg_override": cfg,
-                "part_path": str(part),
-                "pim_label": label,
-                "max_inflight_requests": 16,
-                "mac_mode": "per_kind",
-            })
+                "part_path": str(part), "pim_label": label,
+                "max_inflight_requests": 16, "mac_mode": "per_kind"})
 
     total = len(tasks)
     expected = len(FTABLE_WORKLOADS) * len(PIM_CONFIGS)
@@ -1288,16 +1238,13 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
                     except Exception as exc:
                         print(f"[ftable] FAILED {idx}/{total}: {task['model_key']} {task['pim_label']}: {exc}", flush=True)
 
-    # Assemble table rows
+    # Assemble rows
     from lib.backend_replay import _infer_model_family
     from ramulator.workload_surrogate.generate_full_transformer import get_model_spec
 
     rows: list[dict] = []
     for wl in FTABLE_WORKLOADS:
         model_key = wl["model_key"]
-        phase = wl["phase"]
-        # Mixtral-8x7B has no registry spec (generated via dedicated function);
-        # fall back to fixed metadata.
         try:
             spec = get_model_spec(model_key)
         except (KeyError, ValueError):
@@ -1308,14 +1255,11 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
             num_layers = int(spec.num_layers)
         elif model_key == "mixtral-8x7b":
             model_name = "Mixtral-8x7B"
-            hidden_size = 4096
-            num_layers = 32
+            hidden_size = 4096; num_layers = 32
         else:
             model_name = model_key
-            hidden_size = 0
-            num_layers = 0
+            hidden_size = 0; num_layers = 0
 
-        # Load k1 and k2 results
         k1_part = _part_path(model_key, "k1")
         k2_part = _part_path(model_key, "k2")
         if not k1_part.exists():
@@ -1328,32 +1272,23 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
         k1 = json.loads(k1_part.read_text(encoding="utf-8"))
         k2 = json.loads(k2_part.read_text(encoding="utf-8"))
 
-        cycles_k1 = int(k1["cycles"])
-        cycles_k2 = int(k2["cycles"])
-        runtime_ns_k1 = float(k1["runtime_ns"])
-        runtime_ns_k2 = float(k2["runtime_ns"])
+        cycles_k1 = int(k1["cycles"]); cycles_k2 = int(k2["cycles"])
+        runtime_ns_k1 = float(k1["runtime_ns"]); runtime_ns_k2 = float(k2["runtime_ns"])
         slowdown = (cycles_k2 / cycles_k1) if cycles_k1 > 0 else 0.0
-
         mpu_stalls_k2 = int(k2.get("pim_mpu_group_stalls", 0) or 0)
         shared_block_stall_pct = (mpu_stalls_k2 / cycles_k2 * 100.0) if cycles_k2 > 0 else 0.0
 
-        workload_label = f"{model_name} {phase}"
-        if phase == "decode" and wl.get("past_len"):
+        workload_label = f"{model_name} {wl['phase']}"
+        if wl["phase"] == "decode" and wl.get("past_len"):
             workload_label += f" (past={wl['past_len']})"
-        elif phase == "prefill" and wl.get("prompt_len"):
-            workload_label += f" (P={wl['prompt_len']})"
 
-        row = {
-            "workload": workload_label,
-            "model_key": model_key,
+        rows.append({
+            "workload": workload_label, "model_key": model_key,
             "model_family": _infer_model_family(model_name),
-            "phase": phase,
-            "hidden_size": hidden_size,
-            "num_layers": num_layers,
-            "cycles_k1": cycles_k1,
-            "cycles_k2": cycles_k2,
-            "runtime_ns_k1": runtime_ns_k1,
-            "runtime_ns_k2": runtime_ns_k2,
+            "phase": wl["phase"],
+            "hidden_size": hidden_size, "num_layers": num_layers,
+            "cycles_k1": cycles_k1, "cycles_k2": cycles_k2,
+            "runtime_ns_k1": runtime_ns_k1, "runtime_ns_k2": runtime_ns_k2,
             "slowdown": round(slowdown, 4),
             "pim_simultaneous_active_banks_peak_k1": int(k1.get("pim_simultaneous_active_banks_peak", 0) or 0),
             "pim_simultaneous_active_banks_peak_k2": int(k2.get("pim_simultaneous_active_banks_peak", 0) or 0),
@@ -1368,20 +1303,20 @@ def collect_ftable(output_dir: Path, *, force: bool = False, workers: int = 1) -
             "pim_banks_per_mpu_k2": int(k2.get("pim_banks_per_mpu", 2) or 2),
             "replay_ok_k1": bool(k1.get("replay_ok")),
             "replay_ok_k2": bool(k2.get("replay_ok")),
-        }
-        rows.append(row)
+        })
 
-    payload = {
+    _write_json(path, {
         "schema_version": 1,
-        "description": "Transformer-trace PIM comparison: CD-PIM dedicated per-bank CU (k=1) vs LP-Spec 2-banks/MPU shared (k=2). Per-kind lowering: weight-stationary FFN/projection/MoE → all-bank broadcast PIM_MAC_AB (k2 pays 2x AB latency); data-stationary attention (KV per-bank slice) → per-bank PIM_MAC (k-invariant).",
+        "description": "Transformer-trace PIM comparison: CD-PIM dedicated per-bank (k=1) vs shared-MPU 2-banks/MPU (k=2)",
         "provenance": {"date": date.today().isoformat(), "generator": "scripts/gen_figures.py"},
-        "rows": rows,
-    }
-    _write_json(path, payload)
+        "rows": rows})
     print(f"wrote {path} ({len(rows)} rows)")
 
 
-COLLECTORS = {"f2": collect_f2, "f3": collect_f3, "f4": collect_f4, "f5": collect_f5, "f6": collect_f6, "ftable": collect_ftable}
+# ── CLI ─────────────────────────────────────────────────────────────────
+
+COLLECTORS = {"f2": collect_f2, "f3": collect_f3, "f4": collect_f4, "f5": collect_f5,
+              "f6": collect_f6, "ftable": collect_ftable}
 RENDERERS = {"f2": render_f2, "f3": render_f3, "f4": render_f4, "f5": render_f5, "f6": render_f6}
 
 
@@ -1412,12 +1347,12 @@ def main() -> int:
     figure_choices = ["f2", "f3", "f4", "f5", "f6", "ftable", "all"]
     parser = argparse.ArgumentParser(description="Collect and render LPDDR5-PIM F2-F6 artifacts")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--collect", nargs="?", const="all", choices=figure_choices, help="collect data for a figure")
-    group.add_argument("--render", nargs="?", const="all", choices=figure_choices, help="render a figure from cached data")
-    group.add_argument("--all", nargs="?", const="all", choices=figure_choices, help="collect and render")
+    group.add_argument("--collect", nargs="?", const="all", choices=figure_choices)
+    group.add_argument("--render", nargs="?", const="all", choices=figure_choices)
+    group.add_argument("--all", nargs="?", const="all", choices=figure_choices)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--force", action="store_true", help="recompute existing data artifacts")
-    parser.add_argument("--workers", type=int, default=4, help="parallel collection workers")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     if args.workers <= 0:
         parser.error("--workers must be positive")

@@ -1,25 +1,22 @@
-"""Standalone LPDDR5-PIM concrete-trace backend replay.
+"""LPDDR5-PIM concrete-trace backend replay.
 
-Depends only on ``ramulator2/python/ramulator`` — no ``tests/`` imports.
-Used by ``scripts/gen_figures.py`` to collect F4 and F5 simulation data.
+Used by ``scripts/gen_figures.py`` for F4, F5, and ftable data collection.
 """
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
 from collections import Counter
 from pathlib import Path
 
-# Raise the expanded-record ceiling so large models (Llama2-70B) and long
-# prefill sweeps (prompt_len=128) don't hit the 1B Python-level cap.
+# Raise the expanded-record ceiling for large models and long prefill sweeps.
 _ONE_TRILLION = "1000000000000"
 os.environ.setdefault("RAMULATOR_MAX_EXPANDED_RECORDS", _ONE_TRILLION)
 
 from .runner import _extract_dram_layout
 
-# Standard DRAM configuration matching the paper's backend replay setup.
+
 LPDDR5_PIM_CONFIG = {
     "dram_class": "LPDDR5PIM",
     "org_preset": "LPDDR5_8Gb_x16",
@@ -36,22 +33,16 @@ LPDDR5_PIM_CONFIG = {
 
 
 def pim_cfg_per_bank() -> dict:
-    """Return DRAM kwargs for k=1: per-bank (dedicated) PIM — one bank per MPU."""
+    """k=1: dedicated per-bank PIM — one bank per MPU."""
     return {"pim_banks_per_mpu": 1, "pim_mac_execution_model": "shared_mpu_serial"}
 
 
 def pim_cfg_shared() -> dict:
-    """Return DRAM kwargs for k=2: Samsung-style shared PIM — two banks per MPU."""
+    """k=2: shared-MPU PIM — two banks per MPU."""
     return {"pim_banks_per_mpu": 2, "pim_mac_execution_model": "shared_mpu_serial"}
 
 
 def create_dram(cfg: dict | None = None, *, dram_kwargs_overrides: dict | None = None):
-    """Instantiate an LPDDR5PIM DRAM object from config.
-
-    *dram_kwargs_overrides* are merged into the config's dram_kwargs, allowing
-    callers to override ``pim_banks_per_mpu``, ``pim_mac_execution_model``, etc.
-    without cloning the entire config dict.
-    """
     import ramulator
 
     cfg = cfg or LPDDR5_PIM_CONFIG
@@ -69,15 +60,11 @@ def _make_frontend(trace_path: Path, dram, *, clock_ratio: int = 4,
                    max_trace_bytes: int | None = None,
                    max_expanded_records: int | None = None,
                    max_inflight_requests: int = 1):
-    """Build an LPDDR5PIMConcreteTrace frontend for *trace_path*."""
     import ramulator
 
     request_type_ids = {
-        name: idx for idx, name in enumerate(type(dram).supported_requests.keys())
-    }
-    command_ids = {
-        name: idx for idx, name in enumerate(type(dram).commands)
-    }
+        name: idx for idx, name in enumerate(type(dram).supported_requests.keys())}
+    command_ids = {name: idx for idx, name in enumerate(type(dram).commands)}
     layout = _extract_dram_layout(dram)
     kwargs = dict(
         clock_ratio=clock_ratio,
@@ -89,8 +76,8 @@ def _make_frontend(trace_path: Path, dram, *, clock_ratio: int = 4,
         hab_command_id=command_ids["HAB"],
         hab_pim_command_id=command_ids["HAB_PIM"],
         addr_vec_size=layout["addr_vec_size"],
-        max_repeat=100_000_000,     # large prefill traces need >1M per record
-        max_records=10_000_000,     # safety ceiling
+        max_repeat=100_000_000,
+        max_records=10_000_000,
         max_inflight_requests=max_inflight_requests,
     )
     if max_trace_bytes is not None:
@@ -101,7 +88,6 @@ def _make_frontend(trace_path: Path, dram, *, clock_ratio: int = 4,
 
 
 def _make_mem(dram):
-    """Build a minimal LPDDR5PIM memory system (no command-trace plugins)."""
     import ramulator
 
     ctrl = ramulator.controller.LPDDR5PIM(
@@ -119,7 +105,6 @@ def _make_mem(dram):
 
 
 def count_concrete_opcodes(concrete: list[dict]) -> dict[str, int]:
-    """Count expanded opcodes in a concrete record list."""
     counts: Counter[str] = Counter()
     for record in concrete:
         counts[str(record["opcode"])] += int(record.get("repeat", 1))
@@ -127,7 +112,6 @@ def count_concrete_opcodes(concrete: list[dict]) -> dict[str, int]:
 
 
 def time_unit_ns(cfg: dict | None = None) -> float:
-    """Return the tCK period in nanoseconds for the DRAM config."""
     dram = create_dram(cfg)
     _, timing = dram.resolve()
     return float(timing["tCK_ps"]) / 1000.0
@@ -142,27 +126,10 @@ def replay_concrete_trace(
     pim_cfg_override: dict | None = None,
     max_inflight_requests: int = 1,
 ) -> dict:
-    """Run a concrete LPDDR5-PIM trace through the Ramulator backend.
+    """Replay already-lowered concrete opcodes through the Ramulator backend.
 
-    Parameters
-    ----------
-    concrete_records : list[dict]
-        Already-lowered concrete opcode records (SB/HAB/PIM_MAC/etc.).
-    materialize_weights : bool
-        Passed through for documentation; the concrete records should already
-        have been lowered with the appropriate setting.
-    max_trace_bytes, max_expanded_records : int
-        Safety caps forwarded to the C++ frontend.
-    pim_cfg_override : dict | None
-        DRAM kwargs overrides (e.g. ``{"pim_banks_per_mpu": 1}``).
-    max_inflight_requests : int
-        Max concurrent outstanding requests allowed before the frontend blocks
-        (default 1 = fully serial). Set >1 to exercise shared-MPU contention.
-
-    Returns
-    -------
-    dict with keys: cycles, runtime_ns, command_counts, replay_ok,
-    frontend_stats, and stall counters (pim_mpu_group_stalls, …).
+    pim_cfg_override is merged into the DRAM kwargs (e.g. pim_banks_per_mpu).
+    max_inflight_requests controls the frontend's inflight window.
     """
     import ramulator
     from ramulator.workload_surrogate.lpddr5_pim_concrete_trace import write_jsonl
@@ -173,7 +140,6 @@ def replay_concrete_trace(
     with tempfile.TemporaryDirectory() as tmpdir:
         trace_path = Path(tmpdir) / "trace.jsonl"
         write_jsonl(concrete_records, trace_path)
-
         frontend = _make_frontend(
             trace_path, dram,
             clock_ratio=LPDDR5_PIM_CONFIG["frontend_clock_ratio"],
@@ -189,40 +155,32 @@ def replay_concrete_trace(
     ctrl = stats.get("memory_system", {}).get("controller", {})
     fe = stats.get("frontend", {})
     cycles = int(ctrl.get("cycles", 0) or 0)
-
-    # The concrete-trace frontend doesn't export a "completed" field;
-    # replay is OK if cycles > 0 and either pim_mac or pim_mac_ab was issued.
     pim_mac = int(ctrl.get("num_issued_pim_mac", 0) or 0)
-    pim_mac_ab_issued = int(ctrl.get("num_issued_pim_mac_ab", 0) or 0)
-    replay_ok = cycles > 0 and (pim_mac > 0 or pim_mac_ab_issued > 0)
+    pim_mac_ab = int(ctrl.get("num_issued_pim_mac_ab", 0) or 0)
+    replay_ok = cycles > 0 and (pim_mac > 0 or pim_mac_ab > 0)
 
-    # PIM stall / resource counters (exposed by LPDDR5PIM controller).
-    stall_key = lambda k: int(ctrl.get(k, 0) or 0)
-
+    _s = lambda k: int(ctrl.get(k, 0) or 0)
     return {
         "cycles": cycles,
         "runtime_ns": cycles * tck_ns,
         "command_counts": count_concrete_opcodes(concrete_records),
         "pim_mac_issued": pim_mac,
-        "pim_mac_ab_issued": pim_mac_ab_issued,
+        "pim_mac_ab_issued": pim_mac_ab,
         "pim_bcast_issued": int(ctrl.get("num_issued_pim_bcast", 0) or 0),
         "replay_ok": replay_ok,
         "frontend_stats": {
             k: fe[k] for k in ("requests_issued", "pim_requests_completed",
-                                "completed", "total_records_replayed")
-            if k in fe
-        },
-        # PIM stall counters
-        "pim_mpu_group_stalls": stall_key("pim_mpu_group_stalls"),
-        "pim_dependency_stalls": stall_key("pim_dependency_stalls"),
-        "pim_capacity_stalls": stall_key("pim_capacity_stalls"),
-        "pim_inflight_peak": stall_key("pim_inflight_peak"),
-        "pim_simultaneous_active_banks_peak": stall_key("pim_simultaneous_active_banks_peak"),
-        "pim_banks_per_mpu": stall_key("pim_banks_per_mpu"),
-        "effective_mpu_groups": stall_key("effective_mpu_groups"),
-        "pim_ab_mac_latency_cycles": stall_key("pim_ab_mac_latency_cycles"),
-        "num_bank_timing_blocked_cycles": stall_key("num_bank_timing_blocked_cycles"),
-        "num_mpu_group_busy_blocked_cycles": stall_key("num_mpu_group_busy_blocked_cycles"),
+                                "completed", "total_records_replayed") if k in fe},
+        "pim_mpu_group_stalls": _s("pim_mpu_group_stalls"),
+        "pim_dependency_stalls": _s("pim_dependency_stalls"),
+        "pim_capacity_stalls": _s("pim_capacity_stalls"),
+        "pim_inflight_peak": _s("pim_inflight_peak"),
+        "pim_simultaneous_active_banks_peak": _s("pim_simultaneous_active_banks_peak"),
+        "pim_banks_per_mpu": _s("pim_banks_per_mpu"),
+        "effective_mpu_groups": _s("effective_mpu_groups"),
+        "pim_ab_mac_latency_cycles": _s("pim_ab_mac_latency_cycles"),
+        "num_bank_timing_blocked_cycles": _s("num_bank_timing_blocked_cycles"),
+        "num_mpu_group_busy_blocked_cycles": _s("num_mpu_group_busy_blocked_cycles"),
     }
 
 
@@ -238,24 +196,10 @@ def generate_and_replay(
     interleave_depth: int = 4,
     mac_mode: str = "per_kind",
 ) -> dict:
-    """End-to-end: generate semantic → lower to concrete → replay backend.
+    """Generate semantic records → lower to concrete → replay through backend.
 
-    Parameters
-    ----------
-    phase : "decode" or "prefill"
-    model_key : Registry name (e.g. "llama2-7b", "mixtral-8x7b").
-    past_len : Context length for decode (ignored for prefill).
-    prompt_len : Prompt length for prefill (ignored for decode).
-    materialize_weights : False = steady-state, True = cold-start.
-    pim_cfg_override : dict | None
-        DRAM kwargs overrides (e.g. ``pim_cfg_per_bank()`` for k=1).
-    max_inflight_requests : int
-        Max concurrent outstanding requests (default 1 = serial).
-
-    Returns
-    -------
-    dict matching replay_concrete_trace output, plus 'model_key', 'phase',
-    'mode', and 'opcode_counts' (from the concrete records before replay).
+    mac_mode: "per_kind" (weight-stationary FFN=all-bank, attention=per-bank),
+              "per_bank" (all per-bank PIM_MAC), or "all_bank" (all PIM_MAC_AB).
     """
     from ramulator.workload_surrogate.generate_full_transformer import (
         generate_dense_decoder_records_for_model,
@@ -266,7 +210,6 @@ def generate_and_replay(
         lower_semantic_records_to_concrete,
     )
 
-    # Generate semantic records
     if model_key == "mixtral-8x7b":
         if phase != "decode":
             raise ValueError("Mixtral-8x7B only supports decode phase")
@@ -278,14 +221,9 @@ def generate_and_replay(
     else:
         raise ValueError(f"Unknown phase: {phase}")
 
-    # Lower to concrete; enable bank interleaving only when the caller requests
-    # concurrent inflight ops (ftable path).  Serial-latency figures (F4/F5/F6)
-    # keep max_inflight_requests=1 and get the unchanged bank-major emission.
-    #
-    # For the interleaved path we must hand the lowering the device's real
-    # multi-level bank decomposition (bank_positions/bank_counts) so flat banks
-    # 0..N-1 map correctly into the addr_vec.  Otherwise banks beyond the single
-    # bank_level slot's capacity (4 on the 8Gb x16 preset) alias incorrectly.
+    # Bank interleaving is only applied when concurrent inflight is enabled.
+    # We must pass the device's real multi-level bank decomposition so flat
+    # bank indices map correctly into the addr_vec.
     interleave_banks = max_inflight_requests > 1
     lower_kwargs: dict = {
         "materialize_weights": materialize_weights,
@@ -303,33 +241,19 @@ def generate_and_replay(
     concrete = lower_semantic_records_to_concrete(semantic, **lower_kwargs)
     opcode_counts = count_concrete_opcodes(concrete)
 
-    # Inflight-window policy.
-    #
-    # All-bank (PIM_MAC_AB) ops are strictly serialized in the controller (one
-    # m_pim_ab_inflight at a time) and already address every bank per op, so
-    # concurrency is modeled by the banks_per_mpu-scaled AB latency, NOT by a wide
-    # window.  Pure-all_bank research traces stay at width 1.
-    #
-    # per_kind and per_bank both get a wide window auto-scaled to span all banks:
-    # - per_kind traces mix all-bank FFN ops with per-bank attention ops; the
-    #   wide window lets per-bank PIM_MAC on independent banks issue in parallel.
-    #   Change 1 (controller-side AB-inflight short-circuit) keeps the embedded
-    #   all-bank op scans cheap even with a wide window.
-    # - per_bank traces are pure per-bank PIM_MAC; the wide window exposes bank
-    #   parallelism for the shared-MPU (k2) contention model.
+    # Inflight window: all-bank ops are serialized by the controller so stay
+    # at width 1. per_kind/per_bank auto-scale to span all banks.
     effective_inflight = max_inflight_requests
     if interleave_banks and mac_mode in ("per_kind", "per_bank"):
-        max_bank_span = max(
-            (len(r["bank_sequence"]) for r in semantic if r.get("bank_sequence")),
-            default=1,
-        )
-        effective_inflight = max(max_inflight_requests, max_bank_span * interleave_depth)
+        max_span = max(
+            (len(r["bank_sequence"]) for r in semantic if r.get("bank_sequence")), default=1)
+        effective_inflight = max(max_inflight_requests, max_span * interleave_depth)
     elif mac_mode == "all_bank":
         effective_inflight = 1
 
-    # Replay through backend
-    result = replay_concrete_trace(concrete, pim_cfg_override=pim_cfg_override,
-                                   max_inflight_requests=effective_inflight)
+    result = replay_concrete_trace(
+        concrete, pim_cfg_override=pim_cfg_override,
+        max_inflight_requests=effective_inflight)
     mode = "cold_start" if materialize_weights else "steady_state"
 
     return {
@@ -343,7 +267,7 @@ def generate_and_replay(
     }
 
 
-# ── Analytical formula helpers (no simulation, pure math) ─────────────
+# ── Analytical prefill formula (no simulation) ─────────────────────────
 
 
 def _ceil_div(n: int, d: int) -> int:
@@ -390,17 +314,10 @@ def _infer_model_family(name: str) -> str:
 
 
 def prefill_formula(model_key: str, *, prompt_len: int) -> dict:
-    """Compute analytical prefill PIM_MAC counts for a model (no simulation).
-
-    Returns a dict with model metadata, per-layer PIM_MAC buckets, and
-    causal-pair statistics needed by the F4-prefill and F5 JSON schemas.
-    """
+    """Analytical prefill PIM_MAC counts per layer (no simulation)."""
     from ramulator.dram.lpddr5_pim import PIM_DATATYPE_RESOURCES
     from ramulator.workload_surrogate.generate_full_transformer import (
-        FFN_VARIANT_PROJECTION_COUNTS,
-        get_dense_prefill_manifests,
-        get_model_spec,
-    )
+        FFN_VARIANT_PROJECTION_COUNTS, get_dense_prefill_manifests, get_model_spec)
 
     spec = get_model_spec(model_key)
     attn_m, _ = get_dense_prefill_manifests(spec, prompt_len=prompt_len)
@@ -415,8 +332,7 @@ def prefill_formula(model_key: str, *, prompt_len: int) -> dict:
         _ceil_div(prompt_len * spec.hidden_size * q_proj, lanes)
         + _ceil_div(prompt_len * spec.hidden_size * kv_proj, lanes)
         + _ceil_div(prompt_len * spec.hidden_size * kv_proj, lanes)
-        + _ceil_div(prompt_len * q_proj * spec.hidden_size, lanes)
-    )
+        + _ceil_div(prompt_len * q_proj * spec.hidden_size, lanes))
     stile = int(attn_m["score_tile_tokens"])
     ctile = int(attn_m["context_tile_tokens"])
     causal_pairs = prompt_len * (prompt_len + 1) // 2
@@ -424,12 +340,11 @@ def prefill_formula(model_key: str, *, prompt_len: int) -> dict:
     attn_per_layer = _prefill_attention_pim_mac_per_layer(
         prompt_len=prompt_len, num_heads=int(spec.num_heads),
         head_dim=int(spec.head_dim), lanes=lanes,
-        score_tile_tokens=stile, context_tile_tokens=ctile,
-    )
+        score_tile_tokens=stile, context_tile_tokens=ctile)
     n_proj = FFN_VARIANT_PROJECTION_COUNTS.get(spec.ffn_variant, 3)
     ffn_per_layer = n_proj * _ceil_div(
-        prompt_len * spec.hidden_size * spec.ffn_hidden_size, lanes,
-    )
+        prompt_len * spec.hidden_size * spec.ffn_hidden_size, lanes)
+
     return {
         "model_name": spec.name,
         "model_family": _infer_model_family(spec.name),
