@@ -1,0 +1,4 @@
+[submodule "ramulator2"]
+	path = ramulator2
+	url = git@github.com:TtitiO/ramulator2.git
+	branch = v2.1
