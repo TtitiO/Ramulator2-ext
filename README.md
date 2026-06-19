@@ -1,10 +1,10 @@
-# Ramulator2-ext
+# PIMScope: Augmenting Ramulator 2.0 with Command-Level LPDDR-PIM for Transformer Inference
 
 Extensions and modifications to [Ramulator 2.0](https://github.com/CMU-SAFARI/ramulator2).
 
-> **Note for reviewers:** The `ramulator2/` directory contains a vendored copy of Ramulator 2.0 (v2.1 branch from `CMU-SAFARI/ramulator2`) with our modifications applied. For anonymous submission, we have flattened the git submodule and included the modified code directly in this repository. The original Ramulator 2.0 is available at [https://github.com/CMU-SAFARI/ramulator2](https://github.com/CMU-SAFARI/ramulator2).
+> The `ramulator2/` directory contains a vendored copy of Ramulator 2.0 (v2.1 branch from `CMU-SAFARI/ramulator2`) with our modifications applied. The original Ramulator 2.0 is available at [https://github.com/CMU-SAFARI/ramulator2](https://github.com/CMU-SAFARI/ramulator2).
 
-# Quick Start: Build and Reproduce Results
+# Quick Start
 
 Use the project-root virtual environment for builds, tests, and paper artifact
 reproduction.
