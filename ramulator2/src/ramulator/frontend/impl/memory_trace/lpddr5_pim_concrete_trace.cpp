@@ -187,19 +187,28 @@ class LPDDR5PIMConcreteTrace : public IFrontEnd, public Implementation {
 
     std::string line;
     int line_num = 0;
+    bool header_parsed = false;
     while (std::getline(trace_file, line)) {
       line_num++;
       if (line.empty()) {
         continue;
-      }
-      if (static_cast<int>(m_records.size()) >= m_max_records) {
-        throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} exceeds max_records {}", file_path_str, m_max_records));
       }
       YAML::Node node;
       try {
         node = YAML::Load(line);
       } catch (const YAML::Exception& exc) {
         throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} line {} parse error: {}", file_path_str, line_num, exc.what()));
+      }
+      // The first non-empty line is the v0.2 header envelope: it carries the
+      // file-level constants (schema_version + provenance) asserted once here
+      // instead of being repeated on every record.
+      if (!header_parsed) {
+        parse_header(node, file_path_str, line_num);
+        header_parsed = true;
+        continue;
+      }
+      if (static_cast<int>(m_records.size()) >= m_max_records) {
+        throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} exceeds max_records {}", file_path_str, m_max_records));
       }
       m_records.push_back(parse_record(node, file_path_str, line_num));
       s_records_loaded++;
@@ -208,11 +217,25 @@ class LPDDR5PIMConcreteTrace : public IFrontEnd, public Implementation {
         throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} exceeds max_expanded_records {}", file_path_str, m_max_expanded_records));
       }
     }
+    if (!header_parsed) {
+      throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} is missing the v0.2 header line", file_path_str));
+    }
+  }
+
+  void parse_header(const YAML::Node& node, const std::string& path, int line_num) {
+    if (node["opcode"]) {
+      throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} line {} expected a v0.2 header (schema_version + provenance) but found a record; regenerate the trace as lpddr5-pim-opcode-v0.2", path, line_num));
+    }
+    require_string(node, "schema_version", path, line_num, "lpddr5-pim-opcode-v0.2");
+    require_provenance(node, path, line_num);
   }
 
   OpcodeRecord parse_record(const YAML::Node& node, const std::string& path, int line_num) {
-    require_string(node, "schema_version", path, line_num, "lpddr5-pim-opcode-v0.1");
-    require_present(node, "record_id", path, line_num);
+    // v0.2 records carry only what varies; file-level constants live in the
+    // header.  Reject stale v0.1 records that still embed those fields.
+    if (node["schema_version"] || node["provenance"]) {
+      throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} line {} record must not carry schema_version/provenance; regenerate the trace as lpddr5-pim-opcode-v0.2", path, line_num));
+    }
     const std::string opcode = require_string(node, "opcode", path, line_num);
     const int repeat = require_int(node, "repeat", path, line_num);
     if (repeat <= 0) {
@@ -222,7 +245,6 @@ class LPDDR5PIMConcreteTrace : public IFrontEnd, public Implementation {
       throw std::runtime_error(fmt::format("LPDDR5PIMConcreteTrace: {} line {} repeat exceeds max_repeat {}", path, line_num, m_max_repeat));
     }
     AddrVec_t addr_vec = require_addr_vec(node, path, line_num);
-    require_provenance(node, path, line_num);
     int64_t addr_byte = -1;
     int64_t addr_byte_stride = 0;
     if (node["addr_byte"]) {

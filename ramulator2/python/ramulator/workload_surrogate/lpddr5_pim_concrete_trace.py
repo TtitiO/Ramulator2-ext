@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 
-CONCRETE_SCHEMA_VERSION = "lpddr5-pim-opcode-v0.1"
+CONCRETE_SCHEMA_VERSION = "lpddr5-pim-opcode-v0.2"
 CONCRETE_GENERATOR_VERSION = "lpddr5-pim-opcode-generator-v0.1"
 CONCRETE_OPCODES = {"READ", "WRITE", "SB", "HAB", "HAB_PIM", "PIM_BCAST", "PIM_MAC", "PIM_MAC_AB"}
 MODE_OPCODES = {"SB", "HAB", "HAB_PIM"}
@@ -98,13 +98,47 @@ def concrete_provenance(*, source_kind: str = "generated", manifest_name: str = 
     }
 
 
+def _validate_provenance(provenance: object) -> None:
+    if not isinstance(provenance, dict):
+        raise ValueError("Concrete opcode provenance must be a map")
+    for key in ("source_kind", "manifest", "generator_version", "claim_boundary", "non_claims"):
+        if key not in provenance:
+            raise ValueError(f"Concrete opcode provenance missing required field: {key}")
+    for claim in REQUIRED_BOUNDARY_CLAIMS:
+        if claim not in provenance["claim_boundary"]:
+            raise ValueError(f"Concrete opcode provenance.claim_boundary missing {claim!r}")
+    for non_claim in DEFAULT_NON_CLAIMS:
+        if non_claim not in provenance["non_claims"]:
+            raise ValueError(f"Concrete opcode provenance.non_claims missing {non_claim!r}")
+
+
+def build_header(provenance: dict | None = None) -> dict:
+    """Build the v0.2 trace header envelope (constants asserted once per file)."""
+    header = {
+        "schema_version": CONCRETE_SCHEMA_VERSION,
+        "provenance": concrete_provenance() if provenance is None else provenance,
+    }
+    validate_header(header)
+    return header
+
+
+def validate_header(header: dict) -> None:
+    if header.get("schema_version") != CONCRETE_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported concrete opcode schema_version: {header.get('schema_version')}")
+    if "provenance" not in header:
+        raise ValueError("Concrete opcode header missing required field: provenance")
+    _validate_provenance(header["provenance"])
+
+
 def validate_record(record: dict) -> None:
-    required = {"schema_version", "record_id", "opcode", "repeat", "addr_vec", "provenance"}
+    required = {"opcode", "repeat", "addr_vec"}
     missing = sorted(required - set(record))
     if missing:
         raise ValueError(f"Concrete opcode record missing required fields: {missing}")
-    if record["schema_version"] != CONCRETE_SCHEMA_VERSION:
-        raise ValueError(f"Unsupported concrete opcode schema_version: {record['schema_version']}")
+    # v0.2 records must not carry file-level constants (those live in the header).
+    forbidden = {"schema_version", "provenance", "record_id"} & set(record)
+    if forbidden:
+        raise ValueError(f"Concrete opcode record must not carry header/constant fields: {sorted(forbidden)}")
     opcode = record["opcode"]
     if opcode in FORBIDDEN_RAW_ATTACC_OPCODES:
         raise ValueError(f"Raw AttAcc opcode is not part of the LPDDR5-PIM concrete schema: {opcode}")
@@ -181,18 +215,14 @@ def validate_record(record: dict) -> None:
         if any(not isinstance(v, int) for v in bp + bc):
             raise ValueError("Concrete opcode bank_positions and bank_counts entries must be integers")
 
-    provenance = record["provenance"]
-    if not isinstance(provenance, dict):
-        raise ValueError("Concrete opcode provenance must be a map")
-    for key in ("source_kind", "manifest", "generator_version", "claim_boundary", "non_claims"):
-        if key not in provenance:
-            raise ValueError(f"Concrete opcode provenance missing required field: {key}")
-    for claim in REQUIRED_BOUNDARY_CLAIMS:
-        if claim not in provenance["claim_boundary"]:
-            raise ValueError(f"Concrete opcode provenance.claim_boundary missing {claim!r}")
-    for non_claim in DEFAULT_NON_CLAIMS:
-        if non_claim not in provenance["non_claims"]:
-            raise ValueError(f"Concrete opcode provenance.non_claims missing {non_claim!r}")
+    # Optional compact semantic-source traceability (lowered traces only).
+    if "sem" in record:
+        sem = record["sem"]
+        if not isinstance(sem, dict):
+            raise ValueError("Concrete opcode sem must be a map")
+        if "id" not in sem:
+            raise ValueError("Concrete opcode sem must contain an 'id'")
+
 
 
 def validate_sequence(records: list[dict]) -> None:
@@ -203,6 +233,8 @@ def validate_sequence(records: list[dict]) -> None:
     if max_expanded_records <= 0:
         raise ValueError(f"{MAX_EXPANDED_RECORDS_ENV} must be positive when set")
     for index, record in enumerate(records):
+        # Accept both rich in-memory records and already-slim v0.2 lines.
+        record = record if "provenance" not in record else slim_record(record)
         validate_record(record)
         expanded_records += record["repeat"]
         if expanded_records > max_expanded_records:
@@ -238,12 +270,55 @@ def expanded_record_count(records: list[dict]) -> int:
     return sum(int(record["repeat"]) for record in records)
 
 
+# Fields that are file-level constants (header) or human prose; never per-record in v0.2.
+_HEADER_PROVENANCE_DROP = {"semantic_source", "notes"}
+_SLIM_DROP = {"schema_version", "record_id", "notes", "provenance"}
+
+
+def header_provenance_from_record(record: dict) -> dict:
+    """Extract the constant provenance block from a rich in-memory record."""
+    provenance = dict(record.get("provenance") or concrete_provenance())
+    for key in _HEADER_PROVENANCE_DROP:
+        provenance.pop(key, None)
+    return provenance
+
+
+def slim_record(record: dict) -> dict:
+    """Strip header constants/prose and compact semantic_source -> sem (v0.2 line)."""
+    slim = {key: value for key, value in record.items() if key not in _SLIM_DROP}
+    semantic_source = (record.get("provenance") or {}).get("semantic_source")
+    if isinstance(semantic_source, dict):
+        sem = {
+            short: semantic_source[full]
+            for short, full in (("id", "record_id"), ("kind", "kind"), ("layer", "layer"), ("op", "op"))
+            if semantic_source.get(full) is not None
+        }
+        if sem:
+            slim["sem"] = sem
+    return slim
+
+
 def write_jsonl(records: list[dict], output_path: Path) -> None:
-    validate_sequence(records)
+    header = build_header(header_provenance_from_record(records[0]) if records else None)
+    slim_records = [slim_record(record) for record in records]
+    validate_sequence(slim_records)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as handle:
-        for record in records:
+        handle.write(stable_json_dumps(header) + "\n")
+        for record in slim_records:
             handle.write(stable_json_dumps(record) + "\n")
+
+
+def read_jsonl(input_path: Path) -> tuple[dict, list[dict]]:
+    """Read a v0.2 trace: returns (validated header, validated slim records)."""
+    lines = [line for line in Path(input_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError("Concrete opcode trace is empty")
+    header = json.loads(lines[0])
+    validate_header(header)
+    records = [json.loads(line) for line in lines[1:]]
+    validate_sequence(records)
+    return header, records
 
 
 def write_json(data: dict, output_path: Path) -> None:
